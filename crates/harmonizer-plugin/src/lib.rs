@@ -154,17 +154,23 @@ impl<V: Variant> Plugin for HarmonizerPlugin<V> {
             buffer_config.max_buffer_size as usize,
         );
         harmonizer.set_params(self.dsp_params());
-        harmonizer.reset();
         self.reported_latency = harmonizer.latency() as u32;
-        context.set_latency_samples(self.reported_latency);
-        self.telemetry.publish(&harmonizer);
         self.harmonizer = Some(harmonizer);
+        self.reset();
+        context.set_latency_samples(self.reported_latency);
         true
     }
 
     fn reset(&mut self) {
+        self.input_watch = InputWatch::default();
         if let Some(harmonizer) = &mut self.harmonizer {
             harmonizer.reset();
+            let input_changed = self
+                .input_watch
+                .publish(&self.telemetry, harmonizer.sample_rate());
+            if self.telemetry.publish(harmonizer) | input_changed {
+                self.repaint.request_repaint();
+            }
         }
     }
 
@@ -286,3 +292,32 @@ impl<V: Variant> Vst3Plugin for HarmonizerPlugin<V> {
 }
 
 nice_export_vst3!(HarmonizerPlugin<Fx>, HarmonizerPlugin<Instrument>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn reset_clears_the_editors_input_history() {
+        let mut plugin = HarmonizerPlugin::<Fx> {
+            harmonizer: Some(Harmonizer::new(48_000.0, 512)),
+            ..Default::default()
+        };
+        plugin.input_watch.note_received();
+        plugin
+            .input_watch
+            .observe(0.5, 144_000, 48_000.0, Some(false));
+        plugin.input_watch.publish(&plugin.telemetry, 48_000.0);
+        assert!(plugin.telemetry.notes_seen.load(Ordering::Relaxed));
+        assert!(plugin.telemetry.input_unpitched.load(Ordering::Relaxed));
+
+        plugin.reset();
+        assert!(!plugin.telemetry.notes_seen.load(Ordering::Relaxed));
+        assert!(!plugin.telemetry.input_unpitched.load(Ordering::Relaxed));
+        assert_eq!(plugin.telemetry.input_meter.load(Ordering::Relaxed), 0.0);
+
+        plugin.input_watch.publish(&plugin.telemetry, 48_000.0);
+        assert!(!plugin.telemetry.notes_seen.load(Ordering::Relaxed));
+    }
+}
