@@ -1,7 +1,7 @@
 use super::{
     check,
     interfaces::{Automation, Events, Handler},
-    keep, param_id,
+    param_id,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{f64::consts::TAU, mem, ptr};
@@ -35,9 +35,8 @@ pub(super) fn check_audio(
     processor: &ComPtr<IAudioProcessor>,
     handler: &Handler,
     instrument: bool,
-    allow_aux_workaround: bool,
-) -> Result<bool> {
-    let used_workaround = negotiate(component, processor, instrument, allow_aux_workaround)?;
+) -> Result<()> {
+    negotiate(component, processor, instrument)?;
     let mut active_buses = 0;
     let result = (|| {
         for (media, direction) in BUSES {
@@ -65,38 +64,28 @@ pub(super) fn check_audio(
         let result = (|| {
             check(unsafe { processor.setProcessing(1) }, "setProcessing(true)")?;
             let result = render(processor, handler);
-            keep(
-                result,
-                check(
-                    unsafe { processor.setProcessing(0) },
-                    "setProcessing(false)",
-                ),
-            )
+            result.and(check(
+                unsafe { processor.setProcessing(0) },
+                "setProcessing(false)",
+            ))
         })();
-        keep(
-            result,
-            check(unsafe { component.setActive(0) }, "setActive(false)"),
-        )
+        result.and(check(unsafe { component.setActive(0) }, "setActive(false)"))
     })();
     let mut result = result;
     for &(media, direction) in BUSES[..active_buses].iter().rev() {
-        result = keep(
-            result,
-            check(
-                unsafe { component.activateBus(media, direction, 0, 0) },
-                "deactivate bus",
-            ),
-        );
+        result = result.and(check(
+            unsafe { component.activateBus(media, direction, 0, 0) },
+            "deactivate bus",
+        ));
     }
-    result.map(|()| used_workaround)
+    result
 }
 
 fn negotiate(
     component: &ComPtr<IComponent>,
     processor: &ComPtr<IAudioProcessor>,
     instrument: bool,
-    allow_aux_workaround: bool,
-) -> Result<bool> {
+) -> Result<()> {
     for (media, dir) in BUSES {
         let count = unsafe { component.getBusCount(media, dir) };
         ensure!(count == 1, "expected one {media}/{dir} bus, found {count}");
@@ -123,28 +112,16 @@ fn negotiate(
         );
     }
 
-    // nice-plug 0.4.2 reads past the advertised input count on aux-only layouts.
-    let mut input = [SpeakerArr::kStereo, SpeakerArr::kEmpty];
+    let mut input = SpeakerArr::kStereo;
     let mut output = SpeakerArr::kStereo;
-    let result = check(
-        unsafe { processor.setBusArrangements(input.as_mut_ptr(), 1, &mut output, 1) },
-        "setBusArrangements(stereo)",
-    );
-    if result.is_ok() || !instrument {
-        return result.map(|()| false);
-    }
-    if !allow_aux_workaround {
-        return result.context("the instrument rejected its sole stereo aux input; --allow-aux-workaround can run the remaining checks").map(|()| false);
-    }
-    input[1] = SpeakerArr::kStereo;
     check(
-        unsafe { processor.setBusArrangements(input.as_mut_ptr(), 1, &mut output, 1) },
-        "setBusArrangements with padded aux workaround",
-    )?;
-    eprintln!(
-        "  WARNING: rejected the advertised stereo aux arrangement; accepted only with a padded second stereo entry (nice-plug aux-only workaround)"
-    );
-    Ok(true)
+        unsafe { processor.setBusArrangements(&mut input, 1, &mut output, 1) },
+        if instrument {
+            "setBusArrangements(stereo aux input, stereo main output)"
+        } else {
+            "setBusArrangements(stereo main input and output)"
+        },
+    )
 }
 
 fn render(processor: &ComPtr<IAudioProcessor>, handler: &Handler) -> Result<()> {
