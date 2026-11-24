@@ -20,7 +20,7 @@ QUALITIES = ("low", "balanced", "high")
 NOTES = "C3,E3,G3"
 
 
-def render(binary, source, destination, quality, notes):
+def render(binary, source, destination, quality, notes, expression):
     subprocess.run(
         [
             str(binary.resolve()),
@@ -36,6 +36,8 @@ def render(binary, source, destination, quality, notes):
             notes,
             "--spread",
             "0",
+            "--expression",
+            str(expression),
         ],
         check=True,
         stdout=subprocess.DEVNULL,
@@ -71,10 +73,27 @@ def features(audio):
     return np.mean(low**2), flux
 
 
-def metrics(reference, output, in_features, out_features, target):
+def vibrato_depth(reference):
+    cents = 1200 * np.log2(reference)
+    depth = np.zeros_like(cents)
+    band = signal.butter(
+        2, (4, 8.5), btype="bandpass", fs=TRACK_RATE / HOP, output="sos"
+    )
+    boundaries = (
+        np.flatnonzero(~np.isfinite(np.diff(cents)) | (np.abs(np.diff(cents)) > 100))
+        + 1
+    )
+    for indices in np.split(np.arange(len(cents)), boundaries):
+        if len(indices) >= 40:
+            oscillation = signal.sosfiltfilt(band, cents[indices])
+            depth[indices] = np.abs(signal.hilbert(oscillation))
+    return np.minimum(depth, 100)
+
+
+def metrics(reference, output, tolerance, in_features, out_features, target):
     voiced = np.isfinite(reference)
     error = np.abs(1200 * np.log2(output / target))
-    accurate = voiced & (error <= 15)
+    accurate = voiced & (error <= tolerance)
     # When input and target agree, pitch alone cannot tell leakage from retuning.
     distinguishable = voiced & (np.abs(1200 * np.log2(reference / target)) > 60)
     leaked = distinguishable & (np.abs(1200 * np.log2(output / reference)) <= 30)
@@ -84,6 +103,7 @@ def metrics(reference, output, in_features, out_features, target):
     return {
         "voiced_frames": int(voiced.sum()),
         "accurate_frames": int(accurate.sum()),
+        "strict_accurate_frames": int((voiced & (error <= 15)).sum()),
         "leakage_frames": int(leaked.sum()),
         "distinct_frames": int(distinguishable.sum()),
         "below_100_hz_db": round(
@@ -110,23 +130,34 @@ def evaluate(args):
         else:
             reference = pitch(audio)
             np.save(cache, reference)
+        depth = vibrato_depth(reference)
+        tolerance = 15 + args.expression / 100 * depth
         in_features = features(audio)
         print(source.stem, flush=True)
         for quality in args.quality or QUALITIES:
             destination = args.output / f"{source.stem}-{quality}-a2.wav"
-            render(args.binary, source, destination, quality, "A2")
+            render(args.binary, source, destination, quality, "A2", args.expression)
             output = read(destination)[: len(audio)]
             out_pitch = pitch(output)
             np.savez(
                 args.output / f"{source.stem}-{quality}-pitch.npz",
                 reference=reference,
                 output=out_pitch,
+                vibrato_depth=depth,
             )
             rows.append(
                 {
                     "file": source.stem,
                     "quality": quality,
-                    **metrics(reference, out_pitch, in_features, features(output), 220),
+                    "expression_pct": args.expression,
+                    **metrics(
+                        reference,
+                        out_pitch,
+                        tolerance,
+                        in_features,
+                        features(output),
+                        220,
+                    ),
                 }
             )
             if args.chords and source.stem.startswith(tuple(args.chords)):
@@ -136,6 +167,7 @@ def evaluate(args):
                     args.output / f"{source.stem}-{quality}-chord.wav",
                     quality,
                     NOTES,
+                    args.expression,
                 )
     if not rows:
         raise SystemExit(f"No matching WAV files in {args.corpus}")
@@ -161,7 +193,13 @@ def main():
     parser.add_argument(
         "--chords", action="append", help="also render a chord for this filename prefix"
     )
-    evaluate(parser.parse_args())
+    parser.add_argument(
+        "--expression", type=float, default=100, help="expression percentage (0–100)"
+    )
+    args = parser.parse_args()
+    if not 0 <= args.expression <= 100:
+        parser.error("--expression must be in 0..=100")
+    evaluate(args)
 
 
 if __name__ == "__main__":
