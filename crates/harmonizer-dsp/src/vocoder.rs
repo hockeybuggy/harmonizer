@@ -97,6 +97,22 @@ impl VocoderEngine {
             }
         }
     }
+
+    fn attack_gain(&self, controls: &[VoiceControl; MAX_VOICES]) -> f32 {
+        let mut shifted = 0;
+        for (voice, control) in self.voices.iter().zip(controls) {
+            if !control.active || !voice.initialised {
+                continue;
+            }
+            if control.pitch != 1.0 {
+                shifted += 1;
+            } else if control.formant_ratio == 1.0 {
+                return 0.0;
+            }
+        }
+        // The delayed attack copies are coherent, even when the shifted voices are not.
+        1.0 / shifted.max(1) as f32
+    }
 }
 
 impl Engine for VocoderEngine {
@@ -127,8 +143,6 @@ impl Engine for VocoderEngine {
         if input.is_empty() {
             return;
         }
-        let mut shifted = 0;
-        let mut unison = false;
         for (voice, control) in self.voices.iter_mut().zip(controls) {
             if !control.active {
                 voice.suspended = true;
@@ -137,20 +151,10 @@ impl Engine for VocoderEngine {
             if voice.suspended {
                 voice.reset();
             }
-            if control.pitch != 1.0 {
-                shifted += 1;
-            } else if control.formant_ratio == 1.0 {
-                unison = true;
-            }
         }
-        // The delayed attack copies are coherent, even when the shifted voices are not.
-        let attack_gain = if unison {
-            0.0
-        } else {
-            1.0 / shifted.max(1) as f32
-        };
         let mut offset = 0;
         while offset < input.len() {
+            let attack_gain = self.attack_gain(controls);
             let count = (self.hop - self.cursor % self.hop).min(input.len() - offset);
             let end = self.cursor + count;
             let delay = &mut self.input[self.cursor..end];
