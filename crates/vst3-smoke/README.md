@@ -14,13 +14,6 @@ verifies a latency-change notification, restores a saved state, and queries
 `NSView` support without opening a window. It exits non-zero on the first failed
 check. It does not replace a DAW test or a general VST3 validator.
 
-With nice-plug 0.4.2, the Instrument advertises one stereo aux input, but its
-wrapper checks the second arrangement entry instead of the first. The default
-run reports this failure. To continue testing the Instrument, append
-`--allow-aux-workaround` after the bundle path. This retries with a second stereo
-entry in the backing storage, still advertising one input bus. The workaround
-is reported explicitly; audio is still delivered to the sole aux bus.
-
 The loader executes native code from the supplied bundle; use only trusted
 builds. For nested Git worktrees, note that `nice-plug-xtask` looks for the
 outermost ancestor with a `Cargo.toml`, not the nearest workspace root.

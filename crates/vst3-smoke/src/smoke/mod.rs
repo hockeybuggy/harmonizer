@@ -1,7 +1,7 @@
 mod interfaces;
 mod processing;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use core_foundation::{
     base::TCFType,
     bundle::{CFBundle, CFBundleRef},
@@ -38,32 +38,24 @@ const PARAMETERS: [(&str, &str); 11] = [
 ];
 
 pub fn run() -> Result<()> {
-    let usage = "usage: vst3-smoke <Harmonizer.vst3> [--allow-aux-workaround]";
+    let usage = "usage: vst3-smoke <Harmonizer.vst3>";
     let mut args = env::args_os().skip(1);
     let first = args.next().context(usage)?;
     if first == "--help" {
         println!("{usage}");
         return Ok(());
     }
-    let allow_aux_workaround = match args.next() {
-        None => false,
-        Some(flag) if flag == "--allow-aux-workaround" && args.next().is_none() => true,
-        _ => bail!(usage),
-    };
+    ensure!(args.next().is_none(), "{usage}");
     let path = PathBuf::from(first);
     let bundle = path
         .canonicalize()
         .with_context(|| format!("locate bundle {}", path.display()))?;
-    let used_workaround = check_bundle(&bundle, allow_aux_workaround)?;
-    if used_workaround {
-        println!("PASS: both classes (with the Instrument aux arrangement workaround)");
-    } else {
-        println!("PASS: both classes");
-    }
+    check_bundle(&bundle)?;
+    println!("PASS: both classes");
     Ok(())
 }
 
-fn check_bundle(path: &Path, allow_aux_workaround: bool) -> Result<bool> {
+fn check_bundle(path: &Path) -> Result<()> {
     type Entry = unsafe extern "C" fn(CFBundleRef) -> bool;
     type Exit = unsafe extern "C" fn() -> bool;
     type GetFactory = unsafe extern "system" fn() -> *mut IPluginFactory;
@@ -84,16 +76,16 @@ fn check_bundle(path: &Path, allow_aux_workaround: bool) -> Result<bool> {
 
     // All plug-in interfaces must be released before bundleExit and dlclose.
     let result = match unsafe { ComPtr::from_raw(get_factory()) } {
-        Some(factory) => check_factory(&factory, allow_aux_workaround),
+        Some(factory) => check_factory(&factory),
         None => Err(anyhow::anyhow!("GetPluginFactory returned null")),
     };
     let exited = unsafe { exit() };
-    let used_workaround = result?;
+    result?;
     ensure!(exited, "bundleExit returned false");
-    Ok(used_workaround)
+    Ok(())
 }
 
-fn check_factory(factory: &ComPtr<IPluginFactory>, allow_aux_workaround: bool) -> Result<bool> {
+fn check_factory(factory: &ComPtr<IPluginFactory>) -> Result<()> {
     let mut classes = Vec::new();
     for index in 0..unsafe { factory.countClasses() } {
         let mut info: PClassInfo = unsafe { mem::zeroed() };
@@ -120,21 +112,12 @@ fn check_factory(factory: &ComPtr<IPluginFactory>, allow_aux_workaround: bool) -
         .as_com_ref::<IHostApplication>()
         .unwrap()
         .upcast::<FUnknown>();
-    let mut used_workaround = false;
     for (name, cid) in classes {
         println!("{name}:");
         let instrument = name == INSTRUMENT;
-        let result = check_class(
-            factory,
-            &cid,
-            context.as_ptr(),
-            instrument,
-            allow_aux_workaround,
-        )
-        .with_context(|| name)?;
-        used_workaround |= result;
+        check_class(factory, &cid, context.as_ptr(), instrument).with_context(|| name)?;
     }
-    Ok(used_workaround)
+    Ok(())
 }
 
 fn check_class(
@@ -142,8 +125,7 @@ fn check_class(
     cid: &TUID,
     context: *mut FUnknown,
     instrument: bool,
-    allow_aux_workaround: bool,
-) -> Result<bool> {
+) -> Result<()> {
     let component = create::<IComponent>(factory, cid, "IComponent")?;
     check(
         unsafe { component.initialize(context) },
@@ -154,13 +136,7 @@ fn check_class(
             .cast::<IAudioProcessor>()
             .context("missing IAudioProcessor")?;
         if let Some(controller) = component.cast::<IEditController>() {
-            exercise(
-                &component,
-                &processor,
-                &controller,
-                instrument,
-                allow_aux_workaround,
-            )
+            exercise(&component, &processor, &controller, instrument)
         } else {
             let mut controller_cid = [0; 16];
             check(
@@ -173,26 +149,17 @@ fn check_class(
                 unsafe { controller.initialize(context) },
                 "IEditController::initialize",
             )?;
-            let result = exercise(
-                &component,
-                &processor,
-                &controller,
-                instrument,
-                allow_aux_workaround,
-            );
-            keep(
-                result,
-                check(
-                    unsafe { controller.terminate() },
-                    "IEditController::terminate",
-                ),
-            )
+            let result = exercise(&component, &processor, &controller, instrument);
+            result.and(check(
+                unsafe { controller.terminate() },
+                "IEditController::terminate",
+            ))
         }
     })();
-    keep(
-        result,
-        check(unsafe { component.terminate() }, "IComponent::terminate"),
-    )
+    result.and(check(
+        unsafe { component.terminate() },
+        "IComponent::terminate",
+    ))
 }
 
 fn create<I: Interface>(
@@ -215,8 +182,7 @@ fn exercise(
     processor: &ComPtr<IAudioProcessor>,
     controller: &ComPtr<IEditController>,
     instrument: bool,
-    allow_aux_workaround: bool,
-) -> Result<bool> {
+) -> Result<()> {
     check_parameters(controller)?;
     let handler = ComWrapper::new(Handler::default());
     let handler_ptr = handler.as_com_ref::<IComponentHandler>().unwrap();
@@ -225,13 +191,7 @@ fn exercise(
         "setComponentHandler",
     )?;
     let result = (|| {
-        let used_workaround = processing::check_audio(
-            component,
-            processor,
-            &handler,
-            instrument,
-            allow_aux_workaround,
-        )?;
+        processing::check_audio(component, processor, &handler, instrument)?;
         check_state(component, controller)?;
         let view = unsafe { ComPtr::from_raw(controller.createView(ViewType::kEditor)) }
             .context("createView(editor) returned null")?;
@@ -240,15 +200,12 @@ fn exercise(
             "editor does not support NSView",
         )?;
         println!("  Editor: NSView supported");
-        Ok(used_workaround)
+        Ok(())
     })();
-    keep(
-        result,
-        check(
-            unsafe { controller.setComponentHandler(ptr::null_mut()) },
-            "clear component handler",
-        ),
-    )
+    result.and(check(
+        unsafe { controller.setComponentHandler(ptr::null_mut()) },
+        "clear component handler",
+    ))
 }
 
 fn check_parameters(controller: &ComPtr<IEditController>) -> Result<()> {
@@ -346,12 +303,6 @@ fn check(result: tresult, operation: &str) -> Result<()> {
         "{operation} failed (VST3 result {result})"
     );
     Ok(())
-}
-
-fn keep<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
-    let value = result?;
-    cleanup?;
-    Ok(value)
 }
 
 fn param_id(key: &str) -> ParamID {
