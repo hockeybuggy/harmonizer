@@ -46,3 +46,7 @@ cargo run --release -p vst3-smoke -- target/bundled/Harmonizer.vst3
 cargo run --release -p harmonizer-cli -- --help
 cargo test -p harmonizer-plugin -- --ignored  # writes target/editor-*.png
 ```
+
+`cargo xtask bundle` builds the outermost directory with a `Cargo.toml`, so
+in a worktree under `.worktrees/` it bundles the main checkout's code into the
+main checkout's `target/bundled`. Bundle from the main checkout.
