@@ -11,14 +11,18 @@ use nice_plug_egui::{
     EguiEditor, EguiEditorState, EguiNiceSettings, NiceEguiApp, RepaintNotifier,
     create_egui_editor, widgets::ParamSlider,
 };
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 const WINDOW_SIZE: LogicalSize<f32> = LogicalSize::new(640.0, 390.0);
 const LOWEST_KEY: u8 = 36;
 const HIGHEST_KEY: u8 = 96;
 const LIVE_HEIGHT: f32 = 104.0;
 const GAP: f32 = 8.0;
+// Consonants and breaths drop the pitch for a moment; keep the last note up rather than flicker.
+const PITCH_HOLD: Duration = Duration::from_millis(600);
 const SECTION_GAP: f32 = 12.0;
 
 const BACKGROUND: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x24);
@@ -55,6 +59,7 @@ pub fn create(
             telemetry,
             sidechain,
             gui: None,
+            last_pitch: Cell::new(None),
         },
     )
 }
@@ -64,6 +69,7 @@ pub struct HarmonizerEditor {
     telemetry: Arc<Telemetry>,
     sidechain: bool,
     gui: Option<GuiContext>,
+    last_pitch: Cell<Option<(f32, Instant)>>,
 }
 
 impl NiceEguiApp for HarmonizerEditor {
@@ -98,13 +104,22 @@ impl HarmonizerEditor {
         let hz = self.telemetry.detected_pitch.load(Ordering::Relaxed);
         let pitch = (!relative && hz.is_finite() && hz > 0.0)
             .then(|| (hz, 69.0 + 12.0 * (hz / 440.0).log2()));
+        let now = Instant::now();
+        if let Some((_, note)) = pitch {
+            self.last_pitch.set(Some((note, now)));
+        }
+        let held = self
+            .last_pitch
+            .get()
+            .filter(|&(_, at)| pitch.is_none() && !relative && now - at < PITCH_HOLD)
+            .map(|(note, _)| note);
 
         ui.scope_builder(UiBuilder::new().max_rect(viewport.shrink(16.0)), |ui| {
             editor_style(ui);
             self.header(ui, setter);
             ui.add_space(SECTION_GAP);
             ui.horizontal(|ui| {
-                self.input_card(ui, relative, pitch);
+                self.input_card(ui, relative, pitch, held);
                 self.keyboard(ui, pitch.map(|(_, note)| note), self.hint(relative));
             });
             ui.add_space(SECTION_GAP);
@@ -168,7 +183,13 @@ impl HarmonizerEditor {
         );
     }
 
-    fn input_card(&self, ui: &mut Ui, relative: bool, pitch: Option<(f32, f32)>) {
+    fn input_card(
+        &self,
+        ui: &mut Ui,
+        relative: bool,
+        pitch: Option<(f32, f32)>,
+        held: Option<f32>,
+    ) {
         let rect = card_rect(ui, Vec2::new(128.0, LIVE_HEIGHT), SURFACE);
         let painter = ui.painter_at(rect);
         let top = rect.min + Vec2::splat(12.0);
@@ -187,7 +208,7 @@ impl HarmonizerEditor {
         let note_rect = painter.text(
             top + Vec2::new(0.0, 16.0),
             Align2::LEFT_TOP,
-            note.map_or_else(|| "—".into(), note_name),
+            note.or(held).map_or_else(|| "—".into(), note_name),
             FontId::proportional(28.0),
             if note.is_some() { TEXT } else { MUTED },
         );
@@ -204,10 +225,11 @@ impl HarmonizerEditor {
         let caption = if relative {
             "reference note".into()
         } else {
-            pitch.map_or_else(
-                || "No pitch detected".into(),
-                |(hz, _)| format!("{hz:.1} Hz"),
-            )
+            match (pitch, held) {
+                (Some((hz, _)), _) => format!("{hz:.1} Hz"),
+                (None, Some(_)) => String::new(),
+                (None, None) => "No pitch detected".into(),
+            }
         };
         painter.text(
             top + Vec2::new(0.0, 48.0),
@@ -319,22 +341,18 @@ impl HarmonizerEditor {
                 INPUT_PITCH,
             );
         }
-        if (0..LOWEST_KEY).any(|note| level(note) > 0.0) {
-            triangle(
-                &painter,
-                Pos2::new(title.right() + 12.0, title.center().y),
-                Vec2::new(-4.0, 0.0),
-                ACCENT,
-            );
-        }
-        if (HIGHEST_KEY + 1..128).any(|note| level(note) > 0.0) {
-            triangle(
-                &painter,
-                Pos2::new(keys.right() - 4.0, title.center().y),
-                Vec2::new(4.0, 0.0),
-                ACCENT,
-            );
-        }
+        // Black keys have no room for a label, and notes can fall outside the drawn range.
+        let sounding: Vec<String> = (0..128u8)
+            .filter(|&note| level(note) > 0.0)
+            .map(|note| note_name(note as f32))
+            .collect();
+        painter.text(
+            Pos2::new(title.right() + 12.0, title.center().y),
+            Align2::LEFT_CENTER,
+            sounding.join("  "),
+            FontId::proportional(11.0),
+            ACCENT,
+        );
         if let Some(hint) = hint {
             let mut job = egui::text::LayoutJob::simple(
                 hint.to_owned(),
@@ -575,6 +593,7 @@ mod tests {
             ("waiting", ModeParam::Absolute, false, false, false, 1.0),
             ("no-sidechain", ModeParam::Absolute, true, true, true, 1.0),
             ("out-of-range", ModeParam::Absolute, false, true, false, 1.0),
+            ("consonant", ModeParam::Absolute, false, true, false, 1.0),
             ("absolute-2x", ModeParam::Absolute, false, true, false, 2.0),
         ];
         for (name, mode, sidechain, notes_seen, input_missing, scale) in cases {
@@ -596,7 +615,7 @@ mod tests {
             telemetry
                 .input_missing
                 .store(input_missing, Ordering::Relaxed);
-            if !input_missing {
+            if !input_missing && name != "consonant" {
                 telemetry.detected_pitch.store(221.3, Ordering::Relaxed);
                 let level = if name == "out-of-range" { 0.98 } else { 0.30 };
                 telemetry.input_meter.store(level, Ordering::Relaxed);
@@ -616,6 +635,7 @@ mod tests {
                 telemetry,
                 sidechain,
                 gui: None,
+                last_pitch: Cell::new((name == "consonant").then(|| (57.1, Instant::now()))),
             };
             let host = NoHost;
             let mut harness = egui_kittest::Harness::builder()
