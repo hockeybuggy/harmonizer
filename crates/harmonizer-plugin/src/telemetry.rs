@@ -87,6 +87,9 @@ impl InputWatch {
 
     /// `pitched` is whether absolute mode's tracker found a pitch, or `None` in relative mode.
     pub fn observe(&mut self, peak: f32, samples: usize, sample_rate: f32, pitched: Option<bool>) {
+        if samples == 0 {
+            return;
+        }
         let release = (-(samples as f32) / (METER_RELEASE_SECONDS * sample_rate)).exp();
         self.meter = peak.max(self.meter * release);
         if self.meter < METER_FLOOR {
@@ -179,6 +182,15 @@ mod tests {
         assert_eq!(flags(&watch), (true, false));
         feed(&mut watch, 0.01, 0.5, Some(true));
         assert_eq!(flags(&watch), (false, false));
+    }
+
+    #[test]
+    fn empty_callback_preserves_unpitched_status() {
+        let mut watch = InputWatch::default();
+        feed(&mut watch, 3.1, 0.5, Some(false));
+        assert_eq!(flags(&watch), (false, true));
+        watch.observe(0.0, 0, RATE, Some(false));
+        assert_eq!(flags(&watch), (false, true));
     }
 
     #[test]
