@@ -111,6 +111,56 @@ fn detector_releases_on_noise_or_silence() {
 }
 
 #[test]
+fn tracker_keeps_a_voiced_note_under_breath_noise() {
+    let len = SETTLE;
+    let hz = 140.0;
+    let clean = vowel(hz, &VOWEL_AH, 2 * len);
+    let breath = noise(len);
+    let level = 0.72 * rms(&clean[len..]) / rms(&breath);
+    let mixed: Vec<_> = clean[len..]
+        .iter()
+        .zip(&breath)
+        .map(|(v, n)| v + n * level)
+        .collect();
+    let controls = voices(&[], 1.0);
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        render(&mut engine, &clean[..len], &controls, 256);
+        for block in mixed.chunks(len / 4) {
+            render(&mut engine, block, &controls, 256);
+            let pitch = engine
+                .detected_pitch()
+                .unwrap_or_else(|| panic!("{quality:?}: lost the note"));
+            assert!(cents(pitch, hz).abs() < 25.0, "{quality:?}: {pitch} Hz");
+        }
+    }
+}
+
+#[test]
+fn tracker_prefers_the_established_voice_over_a_drone() {
+    let hz = 198.0;
+    let lead = sine(hz, 2 * SETTLE);
+    let drone = sine(hz / 3.0, SETTLE);
+    let mixed: Vec<_> = lead[SETTLE..]
+        .iter()
+        .zip(&drone)
+        .map(|(v, d)| v + 0.6 * d)
+        .collect();
+    let controls = voices(&[], 1.0);
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        render(&mut engine, &lead[..SETTLE], &controls, 256);
+        for block in mixed.chunks(SETTLE / 4) {
+            render(&mut engine, block, &controls, 256);
+            let pitch = engine
+                .detected_pitch()
+                .unwrap_or_else(|| panic!("{quality:?}: lost the note"));
+            assert!(cents(pitch, hz).abs() < 100.0, "{quality:?}: {pitch} Hz");
+        }
+    }
+}
+
+#[test]
 fn retunes_each_voice_to_its_own_target() {
     let targets = [261.63, 130.81, 349.23, 440.0];
     let input = vowel(196.0, &VOWEL_AH, 3 * SETTLE);
@@ -214,6 +264,21 @@ fn retuning_removes_vibrato() {
         for window in output[0][SETTLE..].windows(1920).step_by(480) {
             assert_pitch(window, 293.66, 15.0);
         }
+    }
+}
+
+#[test]
+fn retuning_does_not_generate_sub_bass_from_vibrato() {
+    let input = vibrato_vowel(48_000);
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        let output = render(&mut engine, &input, &voices(&[330.0], 1.0), 256);
+        let steady = &output[0][SETTLE..];
+        let spectrum = magnitude_spectrum(steady);
+        let cutoff_bin = (100.0 * steady.len() as f32 / SAMPLE_RATE) as usize;
+        let power = |bins: &[f32]| bins.iter().map(|x| x * x).sum::<f32>();
+        let sub_bass = power(&spectrum[..cutoff_bin]) / power(&spectrum);
+        assert!(sub_bass < 1e-7, "{quality:?}: {sub_bass:.3e}");
     }
 }
 

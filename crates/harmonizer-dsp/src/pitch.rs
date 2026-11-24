@@ -14,6 +14,7 @@ pub(crate) struct PitchTracker {
     max_lag: usize,
     period: Option<f32>,
     pending_octave: i8,
+    missed_hops: u8,
     forward: Arc<dyn RealToComplex<f32>>,
     inverse: Arc<dyn ComplexToReal<f32>>,
     time: Vec<f32>,
@@ -41,6 +42,7 @@ impl PitchTracker {
             max_lag,
             period: None,
             pending_octave: 0,
+            missed_hops: 0,
             time: forward.make_input_vec(),
             spectrum: forward.make_output_vec(),
             scratch: vec![
@@ -66,6 +68,7 @@ impl PitchTracker {
         self.until_analysis = self.window.len();
         self.period = None;
         self.pending_octave = 0;
+        self.missed_hops = 0;
     }
 
     pub(crate) fn push(&mut self, sample: f32) -> Option<f32> {
@@ -77,13 +80,22 @@ impl PitchTracker {
         self.until_analysis -= 1;
         if self.until_analysis == 0 {
             self.until_analysis = self.hop;
-            let candidate = self.analyse();
-            self.period = self.confirm_octave(candidate);
+            let (candidate, clarity) = self.analyse();
+            if let Some(period) = candidate {
+                self.missed_hops = 0;
+                self.period = Some(self.confirm_octave(period));
+            } else if self.period.is_some() && clarity >= 0.35 && self.missed_hops < 2 {
+                self.missed_hops += 1;
+                self.pending_octave = 0;
+            } else {
+                self.period = None;
+                self.pending_octave = 0;
+            }
         }
         self.period
     }
 
-    fn analyse(&mut self) -> Option<f32> {
+    fn analyse(&mut self) -> (Option<f32>, f32) {
         let len = self.window.len();
         let mean = self.window.iter().sum::<f32>() / len as f32;
         let frame = self.window[self.write..]
@@ -96,7 +108,7 @@ impl PitchTracker {
         }
         let energy = self.energy[len];
         if energy < 1e-9 * len as f32 {
-            return None;
+            return (None, 0.0);
         }
         self.time[len..].fill(0.0);
         self.forward
@@ -115,20 +127,38 @@ impl PitchTracker {
             let overlap_energy = self.energy[len - lag] + (energy - self.energy[lag]);
             *value *= scale / overlap_energy.max(1e-12);
         }
-        let first_crossing = nsdf.iter().position(|&value| value <= 0.0)?;
-        let mut peaks = (self.min_lag.max(first_crossing + 1)..=self.max_lag)
+        let Some(first_crossing) = nsdf.iter().position(|&value| value <= 0.0) else {
+            return (None, 0.0);
+        };
+        let peaks = (self.min_lag.max(first_crossing + 1)..=self.max_lag)
             .filter(|&lag| nsdf[lag] > nsdf[lag - 1] && nsdf[lag] >= nsdf[lag + 1]);
         let best = peaks.clone().map(|lag| nsdf[lag]).fold(0.0, f32::max);
-        let voicing_threshold = if self.period.is_some() { 0.76 } else { 0.86 };
-        let threshold = (0.9 * best).max(voicing_threshold);
-        let lag = peaks.find(|&lag| nsdf[lag] >= threshold)?;
-        let offset = peak_offset(nsdf[lag - 1], nsdf[lag], nsdf[lag + 1]);
-        Some(lag as f32 + offset)
+        let strong: f32 = if self.period.is_some() { 0.72 } else { 0.80 };
+        let first = peaks
+            .clone()
+            .find(|&lag| nsdf[lag] >= strong.max(0.9 * best));
+        let nearby = self.period.and_then(|previous| {
+            peaks
+                .filter(|&lag| {
+                    (0.80..=1.25).contains(&(lag as f32 / previous)) && nsdf[lag] >= 0.56
+                })
+                .max_by(|&a, &b| nsdf[a].total_cmp(&nsdf[b]))
+        });
+        // A competing lower pitch can have a better recurrence without being the lead voice.
+        let lag = match (first, nearby) {
+            (Some(a), Some(b)) if (a as f32) < 0.8 * b as f32 => Some(a),
+            (first, nearby) => nearby.or(first),
+        };
+        let period = lag.map(|lag| {
+            let offset = peak_offset(nsdf[lag - 1], nsdf[lag], nsdf[lag + 1]);
+            lag as f32 + offset
+        });
+        (period, best)
     }
 
-    fn confirm_octave(&mut self, candidate: Option<f32>) -> Option<f32> {
-        if let (Some(previous), Some(current)) = (self.period, candidate) {
-            let ratio = current / previous;
+    fn confirm_octave(&mut self, candidate: f32) -> f32 {
+        if let Some(previous) = self.period {
+            let ratio = candidate / previous;
             let direction = if (0.46..=0.55).contains(&ratio) {
                 -1
             } else if (1.82..=2.18).contains(&ratio) {
@@ -138,7 +168,7 @@ impl PitchTracker {
             };
             if direction != 0 && self.pending_octave != direction {
                 self.pending_octave = direction;
-                return self.period;
+                return previous;
             }
         }
         self.pending_octave = 0;
