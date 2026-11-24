@@ -4,9 +4,8 @@ A realtime polyphonic harmonizer, driven by MIDI. Hold a note and the incoming
 audio is re-pitched to it; hold a chord and you get one voice per note.
 
 - **Absolute mode** tracks the pitch of a monophonic input (voice, solo
-  instrument) and resynthesises it at exactly each held note, using pitch
-  detection and PSOLA. The singer's own pitch doesn't matter: a held A3 always
-  comes out at A3.
+  instrument) and resynthesises it around each held note, using pitch detection
+  and PSOLA.
 - **Relative mode** transposes any input — chords, pads, drums — by the
   interval between each held note and a reference note (C3 by default), using
   a phase vocoder.
@@ -76,6 +75,8 @@ The small bar left of the status line is the input level.
 - Raise **Dry** to blend the original in at the same latency.
 - **Low latency** is for playing live through monitors; **High quality** is for
   mixing, where Live's delay compensation hides the latency.
+- **Expression** (Absolute only) keeps vibrato and scoops around each held note:
+  100% by default, 0% for fixed pitch (`--expression 0` in the CLI).
 - **Spread** pans voices by pitch, low notes left and high notes right.
 - Pitch bend moves every voice by up to **Bend range** semitones, and the
   sustain pedal holds voices after you let go of the keys.

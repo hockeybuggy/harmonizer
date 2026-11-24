@@ -162,6 +162,10 @@ impl HarmonizerEditor {
                         ui.add_enabled_ui(relative, |ui| {
                             ui.add(ParamSlider::for_param(&params.reference_note, setter))
                         });
+                        ui.add_enabled_ui(!relative, |ui| ui.label("Expression"));
+                        ui.add_enabled_ui(!relative, |ui| {
+                            ui.add(ParamSlider::for_param(&params.expression, setter))
+                        });
                         ui.end_row();
                     });
             });

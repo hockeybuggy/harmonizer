@@ -43,6 +43,8 @@ pub struct HarmonizerParams {
     pub velocity_sensitivity: FloatParam,
     #[id = "spread"]
     pub stereo_spread: FloatParam,
+    #[id = "expression"]
+    pub expression: FloatParam,
 }
 
 fn gain_param(name: &str, default_db: f32) -> FloatParam {
@@ -111,6 +113,7 @@ impl Default for HarmonizerParams {
             release: time_param("Release", 120.0, 5000.0),
             velocity_sensitivity: percent_param("Velocity", 0.5),
             stereo_spread: percent_param("Spread", 0.5),
+            expression: percent_param("Expression", 1.0),
         }
     }
 }

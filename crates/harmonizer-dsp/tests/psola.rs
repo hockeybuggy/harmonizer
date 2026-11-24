@@ -267,6 +267,166 @@ fn retuning_removes_vibrato() {
     }
 }
 
+const CONTOUR_HOP: usize = 192;
+const CONTOUR_RADIUS: usize = 768;
+const B2: f32 = 246.94165;
+const C3: f32 = 261.62555;
+
+fn singing(len: usize, hz: impl Fn(f32) -> f32) -> Vec<f32> {
+    let mut phase = 0.0;
+    let weights: Vec<_> = (1..=32)
+        .map(|k| formant_envelope(k as f32 * B2, &VOWEL_AH) * 0.15)
+        .collect();
+    (0..len)
+        .map(|n| {
+            let sample = weights
+                .iter()
+                .enumerate()
+                .map(|(k, w)| w * ((k + 1) as f32 * phase).sin())
+                .sum();
+            phase = (phase + TAU * hz(n as f32 / SAMPLE_RATE) / SAMPLE_RATE) % TAU;
+            sample
+        })
+        .collect()
+}
+
+fn pitch_contour(samples: &[f32], target: f32) -> Vec<(f32, f32)> {
+    let kernel: Vec<_> = (0..2 * CONTOUR_RADIUS)
+        .map(|n| {
+            let gain = 0.5 - 0.5 * (TAU * n as f32 / (2 * CONTOUR_RADIUS) as f32).cos();
+            let phase = TAU * target * n as f32 / SAMPLE_RATE;
+            (gain * phase.cos(), -gain * phase.sin())
+        })
+        .collect();
+    let expected = TAU * target * CONTOUR_HOP as f32 / SAMPLE_RATE;
+    let mut previous = None;
+    samples
+        .windows(kernel.len())
+        .step_by(CONTOUR_HOP)
+        .enumerate()
+        .filter_map(|(i, frame)| {
+            let (re, im) = frame
+                .iter()
+                .zip(&kernel)
+                .fold((0.0, 0.0), |(re, im), (s, (r, j))| (re + s * r, im + s * j));
+            let phase = im.atan2(re);
+            let delta = phase - previous.replace(phase)? - expected;
+            let residual = delta - (delta / TAU).round() * TAU;
+            let pitch = target + residual * SAMPLE_RATE / (TAU * CONTOUR_HOP as f32);
+            let time = (CONTOUR_RADIUS + i * CONTOUR_HOP - CONTOUR_HOP / 2) as f32 / SAMPLE_RATE;
+            Some((time, cents(pitch, target)))
+        })
+        .collect()
+}
+
+fn vibrato_shape(samples: &[f32], target: f32) -> (f32, f32, f32) {
+    let (mut mean, mut sine, mut cosine, mut count) = (0.0, 0.0, 0.0, 0.0);
+    for (time, cents) in pitch_contour(samples, target) {
+        if (0.5..2.5).contains(&time) {
+            let phase = TAU * 5.5 * time;
+            mean += cents;
+            sine += cents * phase.sin();
+            cosine += cents * phase.cos();
+            count += 1.0;
+        }
+    }
+    (
+        mean / count,
+        2.0 * sine.hypot(cosine) / count,
+        cosine.atan2(sine) / (TAU * 5.5),
+    )
+}
+
+#[test]
+fn expression_carries_vibrato_at_the_reported_latency() {
+    let input = singing(3 * SAMPLE_RATE as usize, |time| {
+        B2 * (40.0 * (TAU * 5.5 * time).sin() / 1200.0).exp2()
+    });
+    let (_, input_depth, input_phase) = vibrato_shape(&input, B2);
+    for quality in Quality::ALL {
+        for amount in [0.0, 0.5, 1.0] {
+            let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+            engine.set_expression(amount);
+            let latency = engine.latency();
+            let output = render(&mut engine, &input, &voices(&[C3], 1.0), 256);
+            let (mean, depth, phase) = vibrato_shape(&output[0][latency..], C3);
+            eprintln!(
+                "{quality:?} {amount}: offset {mean:.2}, depth {depth:.2}, input depth {input_depth:.2}, phase {:.2} ms",
+                1000.0 * (phase - input_phase)
+            );
+            assert!(mean.abs() < 3.0, "{quality:?}: centre {mean:.2} cents");
+            if amount == 0.0 {
+                assert!(
+                    depth < 3.0,
+                    "{quality:?}: legacy vibrato depth {depth:.2} cents"
+                );
+            } else {
+                assert!(
+                    (0.8..=1.2).contains(&(depth / (amount * input_depth))),
+                    "{quality:?} {amount}: depth {depth:.2}/{input_depth:.2} cents"
+                );
+                assert!(
+                    (phase - input_phase).abs() < 0.005,
+                    "{quality:?} {amount}: phase {:.2} ms",
+                    1000.0 * (phase - input_phase)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn expression_recentres_after_a_glide() {
+    let input = singing(SAMPLE_RATE as usize, |time| {
+        let progress = ((time - 0.2) / 0.3).clamp(0.0, 1.0);
+        196.0 * (progress * 7.0 / 12.0).exp2()
+    });
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        engine.set_expression(1.0);
+        let latency = engine.latency();
+        let output = render(&mut engine, &input, &voices(&[C3], 1.0), 256);
+        let contour = pitch_contour(&output[0][latency..], C3);
+        let max_cents = |start, end| {
+            contour
+                .iter()
+                .filter(|(t, _)| (start..end).contains(t))
+                .map(|(_, c)| c.abs())
+                .fold(0.0, f32::max)
+        };
+        let peak = max_cents(0.2, 0.68);
+        let settled = max_cents(0.68, 0.9);
+        eprintln!("{quality:?} glide: {peak:.2} cents peak, {settled:.2} cents settled");
+        assert!(
+            peak <= 110.0,
+            "{quality:?}: glide excursion {peak:.2} cents"
+        );
+        assert!(
+            settled < 12.0,
+            "{quality:?}: {settled:.2} cents after settling"
+        );
+    }
+}
+
+#[test]
+fn expression_centres_the_next_note_after_a_voicing_gap() {
+    let mut input = sine(196.0, SETTLE);
+    input.resize(2 * SETTLE, 0.0);
+    input.extend(sine(207.65, 2 * SETTLE));
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        engine.set_expression(1.0);
+        let latency = engine.latency();
+        let output = render(&mut engine, &input, &voices(&[C3], 1.0), 256);
+        let aligned = &output[0][latency..];
+        assert!(
+            rms(&aligned[7200..9600]) < 1e-4,
+            "{quality:?}: voicing gap is audible"
+        );
+        assert_pitch(&aligned[12_000..13_920], C3, 3.0);
+    }
+}
+
 #[test]
 fn retuning_does_not_generate_sub_bass_from_vibrato() {
     let input = vibrato_vowel(48_000);
@@ -368,6 +528,7 @@ fn output_is_independent_of_block_size() {
     let controls = voices(&[146.83, 261.63, 440.0], 1.2);
     for quality in Quality::ALL {
         let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        engine.set_expression(1.0);
         let reference = render(&mut engine, &input, &controls, 512);
         for block in [1, 7, 64] {
             engine.reset();

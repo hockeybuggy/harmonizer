@@ -91,6 +91,10 @@ pub struct Cli {
     #[arg(long, default_value = "60", value_parser = parse_reference_note)]
     pub reference_note: f32,
 
+    /// Pitch movement retained in absolute mode (percent, 0–100)
+    #[arg(long, default_value_t = 100.0)]
+    pub expression: f32,
+
     /// Voice envelope attack time in milliseconds
     #[arg(long, default_value_t = 10.0)]
     pub attack_ms: f32,
@@ -168,6 +172,9 @@ impl Cli {
         if !self.formant.is_finite() {
             bail!("--formant must be finite");
         }
+        if !(0.0..=100.0).contains(&self.expression) {
+            bail!("--expression must be in 0..=100");
+        }
         if !self.attack_ms.is_finite() || self.attack_ms < 0.0 {
             bail!("--attack-ms must be non-negative");
         }
@@ -193,6 +200,7 @@ impl Cli {
             dry_gain: db_to_gain(self.dry_db),
             formant_semitones: self.formant,
             reference_note: self.reference_note,
+            expression: self.expression / 100.0,
             pitch_bend_range: self.bend_range,
             attack_ms: self.attack_ms,
             release_ms: self.release_ms,
@@ -276,6 +284,27 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn cli_maps_expression_percentage_to_dsp_amount() {
+        let parse = |amount| {
+            Cli::try_parse_from([
+                "harmonizer",
+                "--input",
+                "in.wav",
+                "--output",
+                "out.wav",
+                "--notes",
+                "C3",
+                "--expression",
+                amount,
+            ])
+            .unwrap()
+            .to_params()
+        };
+        assert_eq!(parse("25").unwrap().expression, 0.25);
+        assert!(parse("101").is_err());
     }
 
     #[test]

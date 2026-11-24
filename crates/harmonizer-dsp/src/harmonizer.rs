@@ -162,7 +162,11 @@ impl Harmonizer {
         self.buffers.begin_block(len);
         let controls = self.controls;
         let engine: &mut dyn Engine = match self.params.mode {
-            Mode::Absolute => &mut self.psola[self.params.quality.index()],
+            Mode::Absolute => {
+                let psola = &mut self.psola[self.params.quality.index()];
+                psola.set_expression(self.params.expression);
+                psola
+            }
             Mode::Relative => &mut self.vocoder[self.params.quality.index()],
         };
         engine.process(&self.mono[..len], &controls, &mut self.buffers);

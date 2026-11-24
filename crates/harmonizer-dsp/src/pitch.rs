@@ -71,31 +71,41 @@ impl PitchTracker {
         self.missed_hops = 0;
     }
 
-    pub(crate) fn push(&mut self, sample: f32) -> Option<f32> {
+    pub(crate) fn hop(&self) -> usize {
+        self.hop
+    }
+
+    pub(crate) fn push(&mut self, sample: f32) -> (Option<f32>, Option<f32>) {
         self.window[self.write] = sample;
         self.write += 1;
         if self.write == self.window.len() {
             self.write = 0;
         }
         self.until_analysis -= 1;
-        if self.until_analysis == 0 {
-            self.until_analysis = self.hop;
-            let (candidate, clarity) = self.analyse();
-            if let Some(period) = candidate {
-                self.missed_hops = 0;
-                self.period = Some(self.confirm_octave(period));
-            } else if self.period.is_some() && clarity >= 0.35 && self.missed_hops < 2 {
-                self.missed_hops += 1;
-                self.pending_octave = 0;
-            } else {
-                self.period = None;
-                self.pending_octave = 0;
-            }
+        if self.until_analysis != 0 {
+            return (self.period, None);
         }
-        self.period
+        self.until_analysis = self.hop;
+        let (candidate, best) = self.analyse();
+        let mut clarity = 0.0;
+        if let Some((period, score)) = candidate {
+            self.missed_hops = 0;
+            let confirmed = self.confirm_octave(period);
+            if confirmed == period {
+                clarity = score;
+            }
+            self.period = Some(confirmed);
+        } else if self.period.is_some() && best >= 0.35 && self.missed_hops < 2 {
+            self.missed_hops += 1;
+            self.pending_octave = 0;
+        } else {
+            self.period = None;
+            self.pending_octave = 0;
+        }
+        (self.period, Some(clarity))
     }
 
-    fn analyse(&mut self) -> (Option<f32>, f32) {
+    fn analyse(&mut self) -> (Option<(f32, f32)>, f32) {
         let len = self.window.len();
         let mean = self.window.iter().sum::<f32>() / len as f32;
         let frame = self.window[self.write..]
@@ -149,11 +159,11 @@ impl PitchTracker {
             (Some(a), Some(b)) if (a as f32) < 0.8 * b as f32 => Some(a),
             (first, nearby) => nearby.or(first),
         };
-        let period = lag.map(|lag| {
+        let candidate = lag.map(|lag| {
             let offset = peak_offset(nsdf[lag - 1], nsdf[lag], nsdf[lag + 1]);
-            lag as f32 + offset
+            (lag as f32 + offset, nsdf[lag])
         });
-        (period, best)
+        (candidate, best)
     }
 
     fn confirm_octave(&mut self, candidate: f32) -> f32 {
