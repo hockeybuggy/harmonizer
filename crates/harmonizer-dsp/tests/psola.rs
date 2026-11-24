@@ -161,6 +161,24 @@ fn tracker_prefers_the_established_voice_over_a_drone() {
 }
 
 #[test]
+fn tracker_follows_a_clear_octave_drop_with_a_strong_second_harmonic() {
+    let lower: Vec<_> = sine(110.0, SETTLE * 3)
+        .iter()
+        .zip(sine(220.0, SETTLE * 3))
+        .map(|(fundamental, second)| 0.4 * fundamental + 0.84 * second)
+        .collect();
+    let controls = voices(&[], 1.0);
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        render(&mut engine, &sine(220.0, SETTLE), &controls, 256);
+        assert!(cents(engine.detected_pitch().unwrap(), 220.0).abs() < 10.0);
+        render(&mut engine, &lower, &controls, 256);
+        let pitch = engine.detected_pitch().unwrap();
+        assert!(cents(pitch, 110.0).abs() < 10.0, "{quality:?}: {pitch} Hz");
+    }
+}
+
+#[test]
 fn retunes_each_voice_to_its_own_target() {
     let targets = [261.63, 130.81, 349.23, 440.0];
     let input = vowel(196.0, &VOWEL_AH, 3 * SETTLE);
