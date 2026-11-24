@@ -1,28 +1,93 @@
 use harmonizer_dsp::{Harmonizer, Mode, Params as DspParams, Quality};
 use nice_plug::prelude::*;
+use nice_plug_egui::{EguiEditor, EguiEditorState, RepaintNotifier};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
+mod editor;
 mod params;
+mod telemetry;
 
 pub use params::HarmonizerParams;
+use telemetry::Telemetry;
 
-pub struct HarmonizerPlugin {
-    params: Arc<HarmonizerParams>,
-    harmonizer: Option<Harmonizer>,
-    reported_latency: u32,
+/// The same harmonizer packaged two ways, because hosts differ in how they deliver MIDI to an
+/// audio effect. `Fx` sits on the audio track and takes MIDI routed to it; `Instrument` sits on a
+/// MIDI track and takes the audio through its sidechain input.
+pub trait Variant: 'static + Send + Sync {
+    const NAME: &'static str;
+    const VST3_CLASS_ID: [u8; 16];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout];
+    const SIDECHAIN_INPUT: bool;
 }
 
-impl Default for HarmonizerPlugin {
+pub struct Fx;
+pub struct Instrument;
+
+impl Variant for Fx {
+    const NAME: &'static str = "Harmonizer";
+    const VST3_CLASS_ID: [u8; 16] = *b"HarmonizerHckbgy";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx, Vst3SubCategory::PitchShift];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(2),
+            main_output_channels: NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(1),
+            main_output_channels: NonZeroU32::new(1),
+            ..AudioIOLayout::const_default()
+        },
+    ];
+    const SIDECHAIN_INPUT: bool = false;
+}
+
+impl Variant for Instrument {
+    const NAME: &'static str = "Harmonizer Instrument";
+    const VST3_CLASS_ID: [u8; 16] = *b"HarmonizerInstHb";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Instrument, Vst3SubCategory::PitchShift];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
+        main_input_channels: None,
+        main_output_channels: NonZeroU32::new(2),
+        aux_input_ports: &[new_nonzero_u32(2)],
+        names: PortNames {
+            aux_inputs: &["Sidechain"],
+            ..PortNames::const_default()
+        },
+        ..AudioIOLayout::const_default()
+    }];
+    const SIDECHAIN_INPUT: bool = true;
+}
+
+pub struct HarmonizerPlugin<V: Variant> {
+    params: Arc<HarmonizerParams>,
+    editor_state: Arc<EguiEditorState>,
+    telemetry: Arc<Telemetry>,
+    repaint: RepaintNotifier,
+    harmonizer: Option<Harmonizer>,
+    reported_latency: u32,
+    _variant: PhantomData<V>,
+}
+
+impl<V: Variant> Default for HarmonizerPlugin<V> {
     fn default() -> Self {
         Self {
             params: Arc::new(HarmonizerParams::default()),
+            editor_state: editor::default_state(),
+            telemetry: Arc::new(Telemetry::default()),
+            repaint: RepaintNotifier::new(),
             harmonizer: None,
             reported_latency: 0,
+            _variant: PhantomData,
         }
     }
 }
 
-impl HarmonizerPlugin {
+impl<V: Variant> HarmonizerPlugin<V> {
     fn dsp_params(&self) -> DspParams {
         let p = &self.params;
         DspParams {
@@ -48,34 +113,31 @@ impl HarmonizerPlugin {
     }
 }
 
-impl Plugin for HarmonizerPlugin {
-    const NAME: &'static str = "Harmonizer";
+impl<V: Variant> Plugin for HarmonizerPlugin<V> {
+    const NAME: &'static str = V::NAME;
     const VENDOR: &'static str = "hockeybuggy";
     const URL: &'static str = "https://github.com/hockeybuggy/harmonizer";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        AudioIOLayout {
-            main_input_channels: NonZeroU32::new(2),
-            main_output_channels: NonZeroU32::new(2),
-            ..AudioIOLayout::const_default()
-        },
-        AudioIOLayout {
-            main_input_channels: NonZeroU32::new(1),
-            main_output_channels: NonZeroU32::new(1),
-            ..AudioIOLayout::const_default()
-        },
-    ];
-
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = V::AUDIO_IO_LAYOUTS;
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
 
-    type Editor = ();
+    type Editor = EguiEditor<editor::HarmonizerEditor>;
     type SysExMessage = ();
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
+        editor::create(
+            self.params.clone(),
+            self.telemetry.clone(),
+            self.editor_state.clone(),
+            self.repaint.clone(),
+        )
     }
 
     fn activate(
@@ -92,6 +154,7 @@ impl Plugin for HarmonizerPlugin {
         harmonizer.reset();
         self.reported_latency = harmonizer.latency() as u32;
         context.set_latency_samples(self.reported_latency);
+        self.telemetry.publish(&harmonizer);
         self.harmonizer = Some(harmonizer);
         true
     }
@@ -105,7 +168,7 @@ impl Plugin for HarmonizerPlugin {
     fn process(
         &mut self,
         buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
+        aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let params = self.dsp_params();
@@ -121,6 +184,21 @@ impl Plugin for HarmonizerPlugin {
 
         let num_samples = buffer.samples();
         let channels = buffer.as_slice();
+        if V::SIDECHAIN_INPUT {
+            match aux.inputs.first() {
+                Some(sidechain) => {
+                    let sidechain = sidechain.as_slice_immutable();
+                    for (ch, out) in channels.iter_mut().enumerate() {
+                        match sidechain.get(ch).or(sidechain.first()) {
+                            Some(input) => out.copy_from_slice(&input[..num_samples]),
+                            None => out.fill(0.0),
+                        }
+                    }
+                }
+                None => channels.iter_mut().for_each(|c| c.fill(0.0)),
+            }
+        }
+
         let mut next_event = context.next_event();
         let mut block_start = 0;
         while block_start < num_samples {
@@ -144,6 +222,15 @@ impl Plugin for HarmonizerPlugin {
                 [] => {}
             }
             block_start = block_end;
+        }
+        // Events can arrive after the last sample, e.g. a note off at the very end of a block.
+        while let Some(event) = next_event {
+            handle_event(harmonizer, event);
+            next_event = context.next_event();
+        }
+
+        if self.editor_state.is_open() && self.telemetry.publish(harmonizer) {
+            self.repaint.request_repaint();
         }
 
         ProcessStatus::Normal
@@ -169,10 +256,9 @@ fn handle_event(harmonizer: &mut Harmonizer, event: NoteEvent<()>) {
     }
 }
 
-impl Vst3Plugin for HarmonizerPlugin {
-    const VST3_CLASS_ID: [u8; 16] = *b"HarmonizerHckbgy";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
-        &[Vst3SubCategory::Fx, Vst3SubCategory::PitchShift];
+impl<V: Variant> Vst3Plugin for HarmonizerPlugin<V> {
+    const VST3_CLASS_ID: [u8; 16] = V::VST3_CLASS_ID;
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = V::VST3_SUBCATEGORIES;
 }
 
-nice_export_vst3!(HarmonizerPlugin);
+nice_export_vst3!(HarmonizerPlugin<Fx>, HarmonizerPlugin<Instrument>);
