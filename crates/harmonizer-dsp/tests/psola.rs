@@ -254,6 +254,31 @@ fn unvoiced_output_is_exactly_delayed() {
 }
 
 #[test]
+fn unvoiced_passthrough_is_shared_between_voices() {
+    let input = noise(3 * SETTLE);
+    let mut engine = PsolaEngine::new(SAMPLE_RATE, Quality::Balanced);
+    let latency = engine.latency();
+    let output = render(
+        &mut engine,
+        &input,
+        &voices(&[220.0, 277.18, 329.63], 1.0),
+        64,
+    );
+    let settled = latency + SETTLE / 2;
+    for (n, expected) in input[..input.len() - latency]
+        .iter()
+        .enumerate()
+        .skip(settled)
+    {
+        let sum: f32 = output[..3].iter().map(|voice| voice[n + latency]).sum();
+        assert!(
+            (sum - expected).abs() < 1e-5,
+            "sample {n}: {sum} vs {expected}"
+        );
+    }
+}
+
+#[test]
 fn unity_pitch_output_aligns_at_reported_latency() {
     let input = vowel(220.0, &VOWEL_AH, 3 * SETTLE);
     for quality in Quality::ALL {

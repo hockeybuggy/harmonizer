@@ -18,6 +18,7 @@ pub struct PsolaEngine {
     voices: [Synthesis; MAX_VOICES],
     window: [f32; WINDOW_STEPS + 1],
     fade_step: f32,
+    passthrough_gain: f32,
 }
 
 impl PsolaEngine {
@@ -48,6 +49,7 @@ impl PsolaEngine {
                 0.5 + 0.5 * (PI * i as f32 / WINDOW_STEPS as f32).cos()
             }),
             fade_step: (1.0 / (sample_rate * 0.004)).min(1.0),
+            passthrough_gain: 1.0,
         }
     }
 
@@ -77,6 +79,7 @@ impl Engine for PsolaEngine {
         self.history.reset();
         self.tracker.reset();
         self.analysis.reset();
+        self.passthrough_gain = 1.0;
         for voice in &mut self.voices {
             voice.reset();
         }
@@ -103,8 +106,13 @@ impl Engine for PsolaEngine {
             }
         }
 
+        // Every voice passes unvoiced input through unshifted, and identical copies add
+        // coherently, so share that passthrough between them to keep consonants at their level.
+        let passthrough_target = 1.0 / count.max(1) as f32;
         for (i, &sample) in input.iter().enumerate() {
             self.analyse_sample(sample);
+            self.passthrough_gain +=
+                (passthrough_target - self.passthrough_gain).clamp(-self.fade_step, self.fade_step);
             let time = self.time - self.latency as i64;
             let index = self.history.index(time);
             let dry = self.history.samples[index];
@@ -154,7 +162,8 @@ impl Engine for PsolaEngine {
                     (voice.mix - self.fade_step).max(0.0)
                 };
                 let shifted = voice.render(time, &self.history, &self.window);
-                out.voice_mut(slot)[i] += dry + voice.mix * (shifted - dry);
+                let passthrough = dry * self.passthrough_gain;
+                out.voice_mut(slot)[i] += passthrough + voice.mix * (shifted - passthrough);
             }
             self.time += 1;
         }
