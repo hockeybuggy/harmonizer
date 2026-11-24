@@ -277,6 +277,9 @@ impl Transients {
             }
             self.since_onset = (self.since_onset + self.step).min(self.recovery);
             self.background = self.background * self.decay + power * (1.0 - self.decay);
+            if self.background < 1e-20 {
+                self.background = 0.0;
+            }
         }
     }
 
@@ -499,4 +502,23 @@ impl Voice {
 
 fn wrap_phase(phase: f32) -> f32 {
     phase - TAU * (phase / TAU).round()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn onset_background_has_no_denormal_tail_after_silence() {
+        let mut transients = Transients::new(192_000.0, 8_192, 2_048);
+        transients.detect(&[0.5; 2_048]);
+        for _ in 0..200 {
+            transients.detect(&[0.0; 2_048]);
+        }
+        assert!(
+            !transients.background.is_subnormal(),
+            "{}",
+            transients.background
+        );
+    }
 }
