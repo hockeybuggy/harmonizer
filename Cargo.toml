@@ -4,6 +4,7 @@ members = [
     "crates/harmonizer-dsp",
     "crates/harmonizer-plugin",
     "crates/harmonizer-cli",
+    "crates/vst3-smoke",
     "xtask",
 ]
 default-members = ["crates/harmonizer-dsp", "crates/harmonizer-cli"]

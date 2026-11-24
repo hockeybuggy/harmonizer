@@ -1,0 +1,12 @@
+[package]
+name = "vst3-smoke"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow = "1"
+core-foundation = "0.10"
+libloading = "0.8"
+vst3 = "0.3"
