@@ -1,6 +1,6 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Track the input's pitch and resynthesise it at exactly each held note. Monophonic input.
+    /// Retune monophonic input around each held note.
     #[default]
     Absolute,
     /// Transpose any input by the interval between each held note and `reference_note`.
@@ -34,6 +34,8 @@ pub struct Params {
     pub formant_semitones: f32,
     /// [`Mode::Relative`] only: the MIDI note that leaves the input untransposed.
     pub reference_note: f32,
+    /// [`Mode::Absolute`] only: how much of the input's pitch movement to retain (0.0–1.0).
+    pub expression: f32,
     pub pitch_bend_range: f32,
     pub attack_ms: f32,
     pub release_ms: f32,
@@ -52,6 +54,7 @@ impl Default for Params {
             dry_gain: 0.0,
             formant_semitones: 0.0,
             reference_note: 60.0,
+            expression: 1.0,
             pitch_bend_range: 2.0,
             attack_ms: 10.0,
             release_ms: 120.0,

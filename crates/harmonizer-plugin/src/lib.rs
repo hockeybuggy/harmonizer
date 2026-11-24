@@ -106,6 +106,7 @@ impl<V: Variant> HarmonizerPlugin<V> {
             dry_gain: p.dry.value(),
             formant_semitones: p.formant.value(),
             reference_note: p.reference_note.value() as f32,
+            expression: p.expression.value(),
             pitch_bend_range: p.pitch_bend_range.value() as f32,
             attack_ms: p.attack.value(),
             release_ms: p.release.value(),

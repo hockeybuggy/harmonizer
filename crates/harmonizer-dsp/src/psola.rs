@@ -6,6 +6,10 @@ use crate::params::Quality;
 use crate::pitch::{MAX_PITCH_HZ, PitchTracker, peak_offset};
 
 const WINDOW_STEPS: usize = 512;
+const MAX_DEVIATION: f32 = 100.0 / 1200.0;
+const GLIDE_DEVIATION: f32 = 55.0 / 1200.0;
+const NOTE_JUMP: f32 = 150.0 / 1200.0;
+const CENTRE_SECONDS: f32 = 0.18;
 
 pub struct PsolaEngine {
     sample_rate: f32,
@@ -14,6 +18,8 @@ pub struct PsolaEngine {
     time: i64,
     history: History,
     tracker: PitchTracker,
+    expression: f32,
+    contour: ExpressionContour,
     analysis: AnalysisMarks,
     voices: [Synthesis; MAX_VOICES],
     window: [f32; WINDOW_STEPS + 1],
@@ -42,6 +48,8 @@ impl PsolaEngine {
             lead,
             time: 0,
             history: History::new(size),
+            expression: 0.0,
+            contour: ExpressionContour::new(tracker.hop(), sample_rate, window_ms),
             tracker,
             analysis: AnalysisMarks::new(sample_rate, size),
             voices: std::array::from_fn(|_| Synthesis::new(grain_capacity)),
@@ -53,11 +61,19 @@ impl PsolaEngine {
         }
     }
 
+    pub fn set_expression(&mut self, amount: f32) {
+        self.expression = amount.clamp(0.0, 1.0);
+    }
+
     fn analyse_sample(&mut self, sample: f32) {
         let index = self.history.index(self.time);
         self.history.samples[index] = sample;
-        let period = self.tracker.push(sample);
+        let (period, clarity) = self.tracker.push(sample);
+        if let Some(clarity) = clarity {
+            self.contour.update(period, clarity);
+        }
         self.history.periods[index] = period.unwrap_or(0.0);
+        self.history.deviations[index] = self.contour.deviation;
         self.analysis
             .push(&mut self.history, self.time, sample, period);
     }
@@ -78,6 +94,7 @@ impl Engine for PsolaEngine {
         self.time = 0;
         self.history.reset();
         self.tracker.reset();
+        self.contour.update(None, 0.0);
         self.analysis.reset();
         self.passthrough_gain = 1.0;
         for voice in &mut self.voices {
@@ -128,20 +145,28 @@ impl Engine for PsolaEngine {
                 let mut centre = voice.next_centre.unwrap_or(first as f64);
                 voice.started = true;
                 while centre <= horizon as f64 {
-                    let centre_period =
-                        self.history.periods[self.history.index(centre.round() as i64)];
+                    let centre_sample = centre.round() as i64;
+                    let centre_period = self.history.periods[self.history.index(centre_sample)];
                     if centre_period == 0.0 {
                         voice.next_centre = None;
                         break;
                     }
                     let period = f64::from(centre_period);
-                    let target_period = (f64::from(self.sample_rate) / f64::from(control.pitch))
+                    let expression_ratio = self.contour.ratio(
+                        self.expression,
+                        &self.history,
+                        self.time,
+                        centre_sample,
+                        centre_period,
+                    );
+                    let pitch = f64::from(control.pitch) * expression_ratio;
+                    let target_period = (f64::from(self.sample_rate) / pitch)
                         .clamp(0.25 * period, 4.0 * period)
                         .max(1.0);
                     if let Some(mut mark) = self.analysis.nearest(centre) {
-                        // Anchor neutral grains to the dry timeline rather than letting tiny
-                        // period-estimation errors displace their phase.
+                        // A moving contour can cross unison without being phase-aligned.
                         if control.formant_ratio == 1.0
+                            && (expression_ratio - 1.0).abs() < 0.0012
                             && (target_period - period).abs() < 0.0012 * period
                         {
                             mark.centre = centre;
@@ -177,6 +202,7 @@ struct History {
     samples: Vec<f32>,
     filtered: Vec<f32>,
     periods: Vec<f32>,
+    deviations: Vec<f32>,
     mask: usize,
 }
 
@@ -186,6 +212,7 @@ impl History {
             samples: vec![0.0; size],
             filtered: vec![0.0; size],
             periods: vec![0.0; size],
+            deviations: vec![0.0; size],
             mask: size - 1,
         }
     }
@@ -206,6 +233,87 @@ impl History {
         self.samples.fill(0.0);
         self.filtered.fill(0.0);
         self.periods.fill(0.0);
+        self.deviations.fill(0.0);
+    }
+}
+
+struct ExpressionContour {
+    centre: Option<f32>,
+    previous: f32,
+    deviation: f32,
+    slope: f32,
+    glide_hops: usize,
+    hop: f32,
+    slow_step: f32,
+    fast_step: f32,
+    glide_hold: usize,
+    advance: i64,
+}
+
+impl ExpressionContour {
+    fn new(hop: usize, sample_rate: f32, window_ms: f32) -> Self {
+        let interval = hop as f32 / sample_rate;
+        Self {
+            centre: None,
+            previous: 0.0,
+            deviation: 0.0,
+            slope: 0.0,
+            glide_hops: 0,
+            hop: hop as f32,
+            slow_step: 1.0 - (-interval / CENTRE_SECONDS).exp(),
+            fast_step: 1.0 - (-interval / 0.012).exp(),
+            glide_hold: (CENTRE_SECONDS / interval).ceil() as usize,
+            // Subtracting the centre leads the measured contour slightly, offsetting some
+            // of the tracker's half-window lag.
+            advance: ((0.5 * window_ms - 2.0) * sample_rate / 1000.0).round() as i64,
+        }
+    }
+
+    fn ratio(&self, amount: f32, history: &History, now: i64, centre: i64, period: f32) -> f64 {
+        if amount == 0.0 {
+            return 1.0;
+        }
+        let desired = centre + self.advance;
+        let index = history.index(desired.min(now));
+        if !(0.9..=1.11).contains(&(history.periods[index] / period)) {
+            return 1.0;
+        }
+        // Where the preset cannot afford the full lookahead, extend the latest contour slope.
+        let ahead = (desired - now).max(0) as f32;
+        let deviation = history.deviations[index] + self.slope * ahead;
+        f64::from((amount * deviation.clamp(-MAX_DEVIATION, MAX_DEVIATION)).exp2())
+    }
+
+    fn update(&mut self, period: Option<f32>, clarity: f32) {
+        let pitch = period.map(|period| -period.log2());
+        if let (Some(mut centre), Some(pitch)) = (self.centre, pitch)
+            && (pitch - self.previous).abs() < NOTE_JUMP
+        {
+            let error = pitch - centre;
+            if error.abs() > GLIDE_DEVIATION {
+                self.glide_hops = self.glide_hold;
+            }
+            let step = if self.glide_hops > 0 {
+                self.fast_step
+            } else {
+                self.slow_step
+            };
+            self.glide_hops = self.glide_hops.saturating_sub(1);
+            centre += step * error;
+            // Ambiguity can justify holding a period, but not turning it into a pitch bend.
+            let trust = ((clarity - 0.79) / 0.14).clamp(0.0, 1.0);
+            let requested = trust * (pitch - centre).clamp(-MAX_DEVIATION, MAX_DEVIATION);
+            let deviation = self.deviation + 0.85 * (requested - self.deviation);
+            self.slope += 0.6 * ((deviation - self.deviation) / self.hop - self.slope);
+            self.deviation = deviation;
+            self.centre = Some(centre);
+        } else {
+            self.centre = pitch;
+            self.deviation = 0.0;
+            self.slope = 0.0;
+            self.glide_hops = 0;
+        }
+        self.previous = pitch.unwrap_or(0.0);
     }
 }
 
