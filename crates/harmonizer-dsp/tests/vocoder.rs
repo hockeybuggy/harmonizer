@@ -164,6 +164,40 @@ fn discards_a_transposed_partial_above_nyquist() {
 }
 
 #[test]
+fn preserves_isolated_attack_timing_when_transposing() {
+    let onset = 6_377;
+    let mut input = vec![0.0; 16_384];
+    let mut seed = 43u32;
+    for (i, sample) in input[onset..onset + 1_440].iter_mut().enumerate() {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *sample = ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5) * (-(i as f32) / 400.0).exp();
+    }
+    for quality in Quality::ALL {
+        let mut engine = VocoderEngine::new(SAMPLE_RATE, quality);
+        let at = onset + engine.latency();
+        let attack = rms(&input[onset..onset + 144]);
+        for ratios in [&[1.26][..], &[1.26, 0.75], &[1.0, 1.26, 0.75]] {
+            engine.reset();
+            let output = render(&mut engine, &input, &voices(ratios, 1.0), 7);
+            let sum: Vec<f32> = (at - 960..at + 144)
+                .map(|i| output[..ratios.len()].iter().map(|slot| slot[i]).sum())
+                .collect();
+            let pre_echo = rms(&sum[..960]) / attack;
+            let onset_level = rms(&sum[960..]) / attack;
+            eprintln!("{quality:?} {ratios:?}: pre-echo {pre_echo:.3}, onset {onset_level:.3}");
+            assert!(
+                pre_echo < 0.025,
+                "{quality:?} {ratios:?}: pre-echo {pre_echo:.3}"
+            );
+            assert!(
+                (0.9..1.1).contains(&onset_level),
+                "{quality:?} {ratios:?}: onset {onset_level:.3}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rendering_is_invariant_to_block_size() {
     let input = vowel(150.0, &VOWEL_AH, 12_337);
     let controls = voices(&[1.0, 1.25, 1.5], 0.85);
@@ -198,13 +232,15 @@ fn a_new_voice_can_use_input_analysed_without_voices() {
 #[test]
 fn resetting_one_slot_discards_its_pending_audio() {
     let mut engine = VocoderEngine::new(SAMPLE_RATE, Quality::Balanced);
-    let input = sine(220.0, 12_288);
-    let controls = voices(&[1.0, 1.0], 1.0);
+    let latency = engine.latency();
+    let mut input = vec![0.0; 12_288 - latency];
+    input.extend(sine(220.0, latency));
+    let controls = voices(&[1.25, 1.25], 1.0);
     render(&mut engine, &input, &controls, 512);
     engine.reset_voice(0);
     let output = render(&mut engine, &[0.0; 256], &controls, 256);
     assert!(rms(&output[0]) < 1e-6);
-    assert!(rms(&output[1]) > 0.3);
+    assert!(rms(&output[1]) > 0.1);
 }
 
 #[test]
