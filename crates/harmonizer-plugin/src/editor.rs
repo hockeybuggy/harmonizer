@@ -1,4 +1,4 @@
-use crate::params::{HarmonizerParams, ModeParam, QualityParam};
+use crate::params::{self, HarmonizerParams, ModeParam, QualityParam};
 use crate::telemetry::Telemetry;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use nice_plug::context::gui::GuiContext;
@@ -11,7 +11,7 @@ use nice_plug_egui::{
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-const WINDOW_SIZE: LogicalSize<f32> = LogicalSize::new(620.0, 400.0);
+const WINDOW_SIZE: LogicalSize<f32> = LogicalSize::new(620.0, 330.0);
 const LOWEST_KEY: u8 = 24;
 const HIGHEST_KEY: u8 = 108;
 
@@ -63,10 +63,14 @@ impl NiceEguiApp for HarmonizerEditor {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut nice_plug_egui::Frame) {
-        let Some(gui) = &self.gui else {
-            return;
-        };
-        let setter = gui.param_setter();
+        if let Some(gui) = &self.gui {
+            self.draw(ui, &gui.param_setter());
+        }
+    }
+}
+
+impl HarmonizerEditor {
+    fn draw(&self, ui: &mut egui::Ui, setter: &ParamSetter) {
         let params = &self.params;
         let relative = params.mode.value() == ModeParam::Relative;
 
@@ -85,7 +89,7 @@ impl NiceEguiApp for HarmonizerEditor {
                     ui.add_space(16.0);
                     enum_buttons(
                         ui,
-                        &setter,
+                        setter,
                         &params.mode,
                         &[
                             (ModeParam::Absolute, "Absolute"),
@@ -95,7 +99,7 @@ impl NiceEguiApp for HarmonizerEditor {
                     ui.add_space(16.0);
                     enum_buttons(
                         ui,
-                        &setter,
+                        setter,
                         &params.quality,
                         &[
                             (QualityParam::LowLatency, "Low latency"),
@@ -121,10 +125,10 @@ impl NiceEguiApp for HarmonizerEditor {
                     .num_columns(4)
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
-                        param_row(ui, &setter, "Wet", &params.wet, "Dry", &params.dry);
+                        param_row(ui, setter, "Wet", &params.wet, "Dry", &params.dry);
                         param_row(
                             ui,
-                            &setter,
+                            setter,
                             "Formant",
                             &params.formant,
                             "Spread",
@@ -132,7 +136,7 @@ impl NiceEguiApp for HarmonizerEditor {
                         );
                         param_row(
                             ui,
-                            &setter,
+                            setter,
                             "Attack",
                             &params.attack,
                             "Release",
@@ -140,7 +144,7 @@ impl NiceEguiApp for HarmonizerEditor {
                         );
                         param_row(
                             ui,
-                            &setter,
+                            setter,
                             "Velocity",
                             &params.velocity_sensitivity,
                             "Bend range",
@@ -148,15 +152,13 @@ impl NiceEguiApp for HarmonizerEditor {
                         );
                         ui.add_enabled_ui(relative, |ui| ui.label("Reference"));
                         ui.add_enabled_ui(relative, |ui| {
-                            ui.add(ParamSlider::for_param(&params.reference_note, &setter))
+                            ui.add(ParamSlider::for_param(&params.reference_note, setter))
                         });
                         ui.end_row();
                     });
             });
     }
-}
 
-impl HarmonizerEditor {
     fn status_text(&self, relative: bool) -> String {
         if relative {
             return format!(
@@ -261,17 +263,8 @@ fn is_black(note: u8) -> bool {
     matches!(note % 12, 1 | 3 | 6 | 8 | 10)
 }
 
-/// Ableton's convention: MIDI note 60 is C3.
 fn note_name(note: f32) -> String {
-    const NAMES: [&str; 12] = [
-        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
-    ];
-    let n = note.round() as i32;
-    format!(
-        "{}{}",
-        NAMES[n.rem_euclid(12) as usize],
-        n.div_euclid(12) - 2
-    )
+    params::note_name(note.round() as i32)
 }
 
 fn enum_buttons<T: Enum + PartialEq + Copy + 'static>(
@@ -309,12 +302,59 @@ fn param_row<A: Param, B: Param>(
 
 #[cfg(test)]
 mod tests {
-    use super::note_name;
+    use super::*;
+    use nice_plug::prelude::{GuiContextInner, ParamPtr, PluginApi, PluginState};
+
+    struct NoHost;
+
+    impl GuiContextInner for NoHost {
+        fn plugin_api(&self) -> PluginApi {
+            PluginApi::Vst3
+        }
+        unsafe fn raw_begin_set_parameter(&self, _param: ParamPtr) {}
+        unsafe fn raw_set_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+            unsafe { param._internal_set_normalized_value(normalized) };
+        }
+        unsafe fn raw_end_set_parameter(&self, _param: ParamPtr) {}
+        fn get_state(&self) -> PluginState {
+            unimplemented!()
+        }
+        fn set_state(&self, _state: PluginState) {}
+        fn request_restart(&self) {}
+    }
 
     #[test]
-    fn note_names_follow_ableton_octaves() {
-        assert_eq!(note_name(60.0), "C3");
-        assert_eq!(note_name(69.0), "A3");
-        assert_eq!(note_name(0.0), "C-2");
+    #[ignore = "needs a GPU; run with --ignored to write target/editor-*.png"]
+    fn render_editor_snapshots() {
+        for mode in [ModeParam::Absolute, ModeParam::Relative] {
+            let params = Arc::new(HarmonizerParams::default());
+            if mode == ModeParam::Relative {
+                let setter = ParamSetter::new(&NoHost);
+                setter.set_parameter(&params.mode, mode);
+            }
+            let telemetry = Arc::new(Telemetry::default());
+            telemetry.detected_pitch.store(221.3, Ordering::Relaxed);
+            telemetry.latency_samples.store(1200, Ordering::Relaxed);
+            for (note, level) in [(57, 1.0), (60, 0.9), (64, 0.6), (67, 0.3)] {
+                telemetry.note_levels[note].store(level, Ordering::Relaxed);
+            }
+            let editor = HarmonizerEditor {
+                params,
+                telemetry,
+                gui: None,
+            };
+            let host = NoHost;
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(Vec2::new(WINDOW_SIZE.width, WINDOW_SIZE.height))
+                .build_ui(|ui| editor.draw(ui, &ParamSetter::new(&host)));
+            harness.run();
+            let image = harness.render().expect("render editor");
+            let path = format!(
+                "{}/../../target/editor-{mode:?}.png",
+                env!("CARGO_MANIFEST_DIR")
+            )
+            .to_lowercase();
+            image.save(&path).unwrap();
+        }
     }
 }

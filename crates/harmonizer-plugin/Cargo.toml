@@ -14,3 +14,7 @@ harmonizer-dsp.workspace = true
 nice-plug = { version = "0.4.2", features = ["assert_process_allocs"] }
 nice-plug-egui = "0.6.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["wgpu"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
