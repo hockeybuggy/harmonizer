@@ -57,6 +57,15 @@ arrive. The editor says which one is missing.
    **Monitor** on **In**. Mute it, or turn **Dry** up on the harmonizer,
    depending on whether you want to hear the original too.
 
+### The plugin window
+
+- **Input** shows the note you're singing, how many cents off it is, and the
+  input level. In Relative mode it shows the reference note instead.
+- **Voices** is a keyboard from C1 to C6 that lights up the harmony notes as
+  they sound, names them, and marks your input pitch in blue.
+- The cards below hold the settings: **Voice** (formant, plus expression or
+  reference depending on the mode), **Mix** and **Notes**.
+
 ### Live's device panel
 
 Unfold the device (the triangle in its title bar) to get the parameters as
@@ -67,7 +76,7 @@ readout and the keyboard.
 
 ### If it's silent
 
-The line under the title explains what's missing:
+A message over the keyboard explains what's missing:
 
 - *No audio coming in* or *No sidechain audio*: nothing reaches the plugin.
   Check the track input, its Monitor setting, and the sidechain source.
@@ -75,8 +84,6 @@ The line under the title explains what's missing:
   track is armed or playing a clip.
 - *No clear pitch*: Absolute mode follows a single voice. Use Relative for
   chords, drums and other polyphonic input.
-
-The small bar left of the status line is the input level.
 
 ### Tips
 
