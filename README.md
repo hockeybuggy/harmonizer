@@ -77,7 +77,8 @@ The small bar left of the status line is the input level.
 - **Low latency** is for playing live through monitors; **High quality** is for
   mixing, where Live's delay compensation hides the latency.
 - **Spread** pans voices by pitch, low notes left and high notes right.
-- Pitch bend moves every voice by up to **Bend range** semitones.
+- Pitch bend moves every voice by up to **Bend range** semitones, and the
+  sustain pedal holds voices after you let go of the keys.
 - Each voice is as loud as the input, so a three-note chord peaks a few dB
   above it. Lower **Wet** if the track clips.
 
