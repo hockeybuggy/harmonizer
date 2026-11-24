@@ -8,6 +8,14 @@ before each input onset, in dB relative to input power in the next 25 ms.
 Rise time is the local 10–90% RMS rise on the same input-anchored windows.
 Unmatched peak power measures energy in peaks over 25 cents from any expected
 shifted peak; it is a proxy for leakage, not a perceptual score.
+
+To compare sustained vowels with directly synthesised references, first run:
+    cargo test -p harmonizer-dsp --release --test vocoder write_phase_vowels -- --ignored
+Then add --vowels target/eval/phase/vowels to the evaluator command. It writes
+vowels.csv and the reference and shifted WAVs alongside the corpus results.
+Vowel spectra are compared at equal RMS. Adjacent-partial phase coherence
+measures stability over time; agreement also penalises dispersion across
+partials, ignoring a common time offset. Both are best at 1.
 """
 
 import argparse
@@ -22,6 +30,7 @@ import soundfile as sf
 
 
 RATE = 48_000
+SEMITONES = {"plus4": 4, "minus5": -5}
 QUALITIES = ("low", "balanced", "high")
 SHIFTS = {"plus4": "64", "minus5": "55", "chord": "60,64,67", "unison": "60"}
 
@@ -152,10 +161,81 @@ def evaluate(args):
                         pre, rise = onset_metrics(envelope(y), timing, env)
                         row.update(pre_db=f"{pre:.2f}", input_pre_db=f"{input_pre:.2f}",
                                    rise_ms=f"{rise:.1f}", input_rise_ms=f"{input_rise:.1f}")
-                    if name in ("plus4", "minus5"):
-                        error, unmatched = pitch_metrics(x, y, 4 if name == "plus4" else -5)
+                    if name in SEMITONES:
+                        error, unmatched = pitch_metrics(x, y, SEMITONES[name])
                         row.update(pitch_error_cents=error, unmatched_pct=unmatched)
                     writer.writerow(row)
+
+
+def vowel_metrics(output, ideal, frequency):
+    start = RATE // 4
+    width = 3 * RATE // 25
+    hop = RATE // 50
+    window = signal.windows.hann(width, sym=False)
+    harmonics = np.arange(1, int(4800 / frequency) + 1)
+    radians = 2 * np.pi * frequency / RATE
+    basis = np.exp(-1j * radians * np.arange(width)[:, None] * harmonics)
+
+    def describe(x):
+        x = np.asarray(x[start:-start], dtype=np.float64)
+        rms = np.sqrt(power(x))
+        if rms == 0:
+            raise ValueError("Sustained-vowel measurement received silence")
+        x = x / rms
+        frames = np.lib.stride_tricks.sliding_window_view(x, width)[::hop] * window
+        partials = frames @ basis
+        partials *= np.exp(-1j * radians * np.arange(len(frames))[:, None] * hop * harmonics)
+        adjacent = partials[:, 1:] * partials[:, :-1].conj()
+        unit = adjacent / np.maximum(np.abs(adjacent), 1e-15)
+        return (
+            20 * np.log10(np.max(np.abs(x))),
+            np.mean(x**4),
+            unit.mean(axis=0),
+            np.abs(adjacent).mean(axis=0),
+            np.abs(np.fft.rfft(frames, axis=1)),
+        )
+
+    crest, kurtosis, phase, _, spectrum = describe(output)
+    ideal_crest, ideal_kurtosis, ideal_phase, weights, ideal_spectrum = describe(ideal)
+    # A time shift rotates all adjacent pairs equally; measure their spread, not that offset.
+    agreement = phase * ideal_phase.conj()
+    return {
+        "crest_db": crest,
+        "ideal_crest_db": ideal_crest,
+        "kurtosis": kurtosis,
+        "ideal_kurtosis": ideal_kurtosis,
+        "phase_coherence": np.average(np.abs(phase), weights=weights),
+        "phase_agreement": np.abs(np.average(agreement, weights=weights)),
+        "spectral_convergence": np.linalg.norm(spectrum - ideal_spectrum) / np.linalg.norm(ideal_spectrum),
+    }
+
+
+def evaluate_vowels(args):
+    fields = ("f0", "semitones", "quality", "crest_db", "ideal_crest_db", "kurtosis",
+              "ideal_kurtosis", "phase_coherence", "phase_agreement", "spectral_convergence")
+    args.output.mkdir(parents=True, exist_ok=True)
+    with (args.output / "vowels.csv").open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for f0 in (110, 150, 220):
+            source = args.output / f"phase-vowel-{f0}-input.wav"
+            samples = np.fromfile(args.vowels / f"{f0}-+0.f32le", dtype="<f4")
+            sf.write(source, samples, RATE, subtype="FLOAT")
+            for name, shift in SEMITONES.items():
+                if name not in args.renders:
+                    continue
+                ideal = np.fromfile(args.vowels / f"{f0}-{shift:+}.f32le", dtype="<f4")
+                sf.write(args.output / f"phase-vowel-{f0}-{name}-ideal.wav", ideal, RATE, subtype="FLOAT")
+                frequency = f0 * 2 ** (shift / 12)
+                for quality in args.qualities:
+                    destination = args.output / f"phase-vowel-{f0}-{quality}-{name}.wav"
+                    render(args.cli, source, destination, quality, SHIFTS[name])
+                    output = load(destination)[: len(ideal)]
+                    if len(output) != len(ideal):
+                        raise ValueError(f"Render shorter than ideal: {destination}")
+                    metrics = vowel_metrics(output, ideal, frequency)
+                    writer.writerow(dict(f0=f0, semitones=shift, quality=quality,
+                                         **{key: f"{value:.5f}" for key, value in metrics.items()}))
 
 
 def main():
@@ -166,7 +246,11 @@ def main():
     parser.add_argument("--files", nargs="+", default=["*.wav"])
     parser.add_argument("--qualities", nargs="+", choices=QUALITIES, default=QUALITIES)
     parser.add_argument("--renders", nargs="+", choices=SHIFTS, default=list(SHIFTS))
-    evaluate(parser.parse_args())
+    parser.add_argument("--vowels", type=Path, help="directory of raw Rust test vowel fixtures")
+    args = parser.parse_args()
+    evaluate(args)
+    if args.vowels:
+        evaluate_vowels(args)
 
 
 if __name__ == "__main__":

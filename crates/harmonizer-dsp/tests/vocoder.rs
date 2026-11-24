@@ -244,6 +244,23 @@ fn resetting_one_slot_discards_its_pending_audio() {
 }
 
 #[test]
+#[ignore = "generate synthetic fixtures for eval_relative.py --vowels"]
+fn write_phase_vowels() -> std::io::Result<()> {
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/eval/phase/vowels");
+    std::fs::create_dir_all(&directory)?;
+    for f0 in [110, 150, 220] {
+        for shift in [-5, 0, 4] {
+            let frequency = f0 as f32 * 2.0_f32.powf(shift as f32 / 12.0);
+            let samples = vowel(frequency, &VOWEL_AH, 2 * SAMPLE_RATE as usize);
+            let bytes: Vec<_> = samples.into_iter().flat_map(f32::to_le_bytes).collect();
+            std::fs::write(directory.join(format!("{f0}-{shift:+}.f32le")), bytes)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "release CPU benchmark"]
 fn eight_voice_cpu() {
     let input = vowel(150.0, &VOWEL_AH, 480_000);
