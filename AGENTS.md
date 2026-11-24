@@ -1,0 +1,42 @@
+# Harmonizer
+
+A realtime, MIDI-driven polyphonic harmonizer written in Rust. Each held MIDI
+note gets a voice that re-pitches the incoming audio to that note. It ships as
+a VST3 plugin (for Ableton Live) and an offline CLI.
+
+## Layout
+
+- `crates/harmonizer-dsp` — all DSP. No plugin-framework dependencies.
+  - `harmonizer.rs` — `Harmonizer` facade: voice allocation, envelopes, dry
+    delay, wet/dry mix, engine selection.
+  - `engine.rs` — the `Engine` trait both re-pitching engines implement.
+  - `psola.rs` + `pitch.rs` — absolute mode: pitch tracking and PSOLA.
+  - `vocoder.rs` — relative mode: phase vocoder with formant preservation.
+- `crates/harmonizer-plugin` — VST3 wrapper (nice-plug) and egui editor.
+- `crates/harmonizer-cli` — offline renderer (`harmonizer` binary).
+- `xtask` — `cargo xtask bundle harmonizer-plugin --release` builds
+  `target/bundled/Harmonizer.vst3`.
+
+## Rules
+
+- Realtime safety: `Engine::process`, `Harmonizer::process` and everything they
+  call must not allocate, lock, or do unbounded work. Allocate in constructors.
+  `crates/harmonizer-dsp/tests/realtime.rs` enforces this with
+  `assert_no_alloc`; keep it passing.
+- Engines must produce identical output regardless of how the input is split
+  into blocks (hosts send anything from 1 to thousands of samples).
+- Latency reported by `Engine::latency()` must be exact: the dry signal is
+  delayed by it and the host compensates for it.
+- Comments only for non-obvious *why*. No narrative or section-header comments.
+- Canadian spelling in prose and identifiers (colour, behaviour, centre).
+- Tests: cover behaviour with measurable assertions (detected pitch of the
+  output, latency alignment, block-size invariance). No trivial tests.
+
+## Commands
+
+```sh
+cargo test -p harmonizer-dsp
+cargo clippy --workspace --all-targets
+cargo xtask bundle harmonizer-plugin --release
+cargo run --release -p harmonizer-cli -- --help
+```

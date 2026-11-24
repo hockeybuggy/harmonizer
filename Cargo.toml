@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/harmonizer-dsp",
+    "crates/harmonizer-plugin",
+    "crates/harmonizer-cli",
+    "xtask",
+]
+default-members = ["crates/harmonizer-dsp", "crates/harmonizer-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+harmonizer-dsp = { path = "crates/harmonizer-dsp" }
+realfft = "3.5"
+hound = "3.5"
+midly = "0.5"
+clap = { version = "4.6", features = ["derive"] }
+assert_no_alloc = "1.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 2
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"

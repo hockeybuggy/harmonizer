@@ -1,0 +1,13 @@
+[package]
+name = "harmonizer-dsp"
+description = "Realtime MIDI-driven polyphonic harmonizer DSP, independent of any plugin API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+realfft.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
