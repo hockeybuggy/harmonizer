@@ -101,6 +101,9 @@ impl Engine for PsolaEngine {
             if control.active {
                 slots[count] = slot;
                 count += 1;
+                self.voices[slot]
+                    .low_cut
+                    .configure(control.pitch, self.sample_rate);
             } else {
                 self.voices[slot].reset();
             }
@@ -161,7 +164,7 @@ impl Engine for PsolaEngine {
                 } else {
                     (voice.mix - self.fade_step).max(0.0)
                 };
-                let shifted = voice.render(time, &self.history, &self.window);
+                let shifted = voice.render(time, dry, &self.history, &self.window);
                 let passthrough = dry * self.passthrough_gain;
                 out.voice_mut(slot)[i] += passthrough + voice.mix * (shifted - passthrough);
             }
@@ -311,6 +314,7 @@ struct Grain {
     inverse_radius: f32,
     weight_floor: f32,
     formant_ratio: f64,
+    neutral: bool,
 }
 
 struct Synthesis {
@@ -318,6 +322,7 @@ struct Synthesis {
     next_centre: Option<f64>,
     grains: Vec<Grain>,
     mix: f32,
+    low_cut: LowCut,
 }
 
 impl Synthesis {
@@ -327,6 +332,7 @@ impl Synthesis {
             next_centre: None,
             grains: Vec::with_capacity(grain_capacity),
             mix: 0.0,
+            low_cut: LowCut::default(),
         }
     }
 
@@ -335,6 +341,7 @@ impl Synthesis {
         self.next_centre = None;
         self.grains.clear();
         self.mix = 0.0;
+        self.low_cut = LowCut::default();
     }
 
     fn queue(
@@ -360,12 +367,20 @@ impl Synthesis {
                 // Keep the Hann taper when grains barely overlap or leave gaps.
                 weight_floor: (target_period as f32 / radius - 1.0).clamp(0.05, 1.0),
                 formant_ratio: f64::from(formant_ratio),
+                neutral: formant_ratio == 1.0 && mark.centre == centre,
             });
         }
     }
 
-    fn render(&mut self, time: i64, history: &History, window: &[f32; WINDOW_STEPS + 1]) -> f32 {
-        let mut total = 0.0;
+    fn render(
+        &mut self,
+        time: i64,
+        dry: f32,
+        history: &History,
+        window: &[f32; WINDOW_STEPS + 1],
+    ) -> f32 {
+        let mut shifted = 0.0;
+        let mut neutral = 0.0;
         let mut weight = 0.0;
         let mut weighted_floor = 0.0;
         let mut i = 0;
@@ -378,7 +393,12 @@ impl Synthesis {
                 let base = index as usize;
                 let a = window[base];
                 let gain = a + (window[base + 1] - a) * (index - base as f32);
-                total += gain * history.sample_at(grain.source + offset * grain.formant_ratio);
+                if grain.neutral {
+                    neutral += gain;
+                } else {
+                    shifted +=
+                        gain * history.sample_at(grain.source + offset * grain.formant_ratio);
+                }
                 weight += gain;
                 weighted_floor += gain * grain.weight_floor;
             } else if offset > 0.0 {
@@ -388,6 +408,39 @@ impl Synthesis {
             i += 1;
         }
         // Blend the floors with the grains so a bend cannot change gain at a window edge.
-        total * weight / (weight * weight).max(weighted_floor).max(f32::MIN_POSITIVE)
+        let normalise = weight / (weight * weight).max(weighted_floor).max(f32::MIN_POSITIVE);
+        self.low_cut.process(shifted * normalise) + dry * neutral * normalise
+    }
+}
+
+#[derive(Default)]
+struct LowCut {
+    cutoff: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    band_state: f32,
+    low_state: f32,
+}
+
+impl LowCut {
+    fn configure(&mut self, pitch: f32, sample_rate: f32) {
+        let cutoff = (0.4 * pitch).min(100.0);
+        if self.cutoff != cutoff {
+            self.cutoff = cutoff;
+            let g = (PI * cutoff / sample_rate).tan();
+            self.a1 = 1.0 / (1.0 + g * (g + std::f32::consts::SQRT_2));
+            self.a2 = g * self.a1;
+            self.a3 = g * self.a2;
+        }
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        let difference = input - self.low_state;
+        let band = self.a1 * self.band_state + self.a2 * difference;
+        let low = self.low_state + self.a2 * self.band_state + self.a3 * difference;
+        self.band_state = 2.0 * band - self.band_state;
+        self.low_state = 2.0 * low - self.low_state;
+        input - std::f32::consts::SQRT_2 * band - low
     }
 }

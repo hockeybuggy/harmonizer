@@ -268,6 +268,21 @@ fn retuning_removes_vibrato() {
 }
 
 #[test]
+fn retuning_does_not_generate_sub_bass_from_vibrato() {
+    let input = vibrato_vowel(48_000);
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        let output = render(&mut engine, &input, &voices(&[330.0], 1.0), 256);
+        let steady = &output[0][SETTLE..];
+        let spectrum = magnitude_spectrum(steady);
+        let cutoff_bin = (100.0 * steady.len() as f32 / SAMPLE_RATE) as usize;
+        let power = |bins: &[f32]| bins.iter().map(|x| x * x).sum::<f32>();
+        let sub_bass = power(&spectrum[..cutoff_bin]) / power(&spectrum);
+        assert!(sub_bass < 1e-7, "{quality:?}: {sub_bass:.3e}");
+    }
+}
+
+#[test]
 fn shifts_formants_independently_of_pitch() {
     let hz = 150.0;
     let ratio = (7.0f32 / 12.0).exp2();
