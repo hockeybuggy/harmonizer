@@ -183,7 +183,7 @@ fn preserves_isolated_attack_timing_when_transposing() {
                 .map(|i| output[..ratios.len()].iter().map(|slot| slot[i]).sum())
                 .collect();
             let pre_echo = rms(&sum[..960]) / attack;
-            let onset_level = rms(&sum[960..]) / attack;
+            let onset_level = rms(&sum[960..]) / attack / (ratios.len() as f32).sqrt();
             eprintln!("{quality:?} {ratios:?}: pre-echo {pre_echo:.3}, onset {onset_level:.3}");
             assert!(
                 pre_echo < 0.025,

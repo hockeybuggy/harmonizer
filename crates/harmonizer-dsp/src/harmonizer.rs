@@ -6,6 +6,9 @@ use crate::vocoder::VocoderEngine;
 use crate::voices::VoiceAllocator;
 
 const GAIN_SMOOTHING_MS: f32 = 10.0;
+// Duck quickly as voices join so a chord never swells, and recover gently as they leave.
+const LOUDNESS_FALL_MS: f32 = 2.0;
+const LOUDNESS_RISE_MS: f32 = 30.0;
 
 /// The complete harmonizer: MIDI notes in, re-pitched voices plus dry signal out.
 ///
@@ -21,10 +24,14 @@ pub struct Harmonizer {
     controls: [VoiceControl; MAX_VOICES],
     buffers: VoiceBuffers,
     mono: Vec<f32>,
+    wet_levels: Vec<f32>,
     dry_delay: [DelayLine; 2],
     pitch_bend: f32,
     wet_gain: Smoothed,
     dry_gain: Smoothed,
+    loudness: f32,
+    loudness_fall: f32,
+    loudness_rise: f32,
 }
 
 impl Harmonizer {
@@ -56,10 +63,14 @@ impl Harmonizer {
             controls: [VoiceControl::default(); MAX_VOICES],
             buffers: VoiceBuffers::new(max_block),
             mono: vec![0.0; max_block],
+            wet_levels: vec![0.0; max_block],
             dry_delay: [DelayLine::new(max_latency), DelayLine::new(max_latency)],
             pitch_bend: 0.0,
             wet_gain: Smoothed::new(params.wet_gain, smoothing),
             dry_gain: Smoothed::new(params.dry_gain, smoothing),
+            loudness: 1.0,
+            loudness_fall: smoothing_coefficient(sample_rate, LOUDNESS_FALL_MS),
+            loudness_rise: smoothing_coefficient(sample_rate, LOUDNESS_RISE_MS),
         }
     }
 
@@ -132,6 +143,7 @@ impl Harmonizer {
         self.pitch_bend = 0.0;
         self.wet_gain.snap();
         self.dry_gain.snap();
+        self.loudness = 1.0;
     }
 
     pub fn process(&mut self, channels: &mut [&mut [f32]]) {
@@ -218,11 +230,35 @@ impl Harmonizer {
             }
         }
 
-        for slot in 0..MAX_VOICES {
-            let voice = self.voices.voices()[slot];
-            if !voice.active {
-                continue;
+        let mut active = [0; MAX_VOICES];
+        let mut count = 0;
+        for (slot, _) in self.voices.active() {
+            active[count] = slot;
+            count += 1;
+        }
+        let active = &active[..count];
+
+        // Voices at different pitches add in power, so scale each by 1/sqrt(n) to keep a chord
+        // as loud as one voice. Counting by envelope lets attacks and releases cross-fade.
+        for i in 0..len {
+            let mut power = 0.0;
+            for &slot in active {
+                let envelope = self.voices.step_envelope(slot, attack_step, release_step);
+                self.buffers.voice_mut(slot)[i] *= envelope;
+                power += envelope * envelope;
             }
+            let target = power.max(1.0).sqrt().recip();
+            let coefficient = if target < self.loudness {
+                self.loudness_fall
+            } else {
+                self.loudness_rise
+            };
+            self.loudness += (target - self.loudness) * coefficient;
+            self.wet_levels[i] = self.wet_gain.next() * self.loudness;
+        }
+
+        for &slot in active {
+            let voice = self.voices.voices()[slot];
             let velocity_gain = 1.0 - sensitivity + sensitivity * voice.velocity;
             let pan = spread * ((voice.note as f32 - 60.0) / 24.0).clamp(-1.0, 1.0);
             let pans = if channel_count == 2 {
@@ -230,19 +266,17 @@ impl Harmonizer {
             } else {
                 [1.0, 1.0]
             };
-            let mut wet = self.wet_gain;
             let rendered = self.buffers.voice(slot);
-            for i in 0..len {
-                let level = self.voices.step_envelope(slot, attack_step, release_step)
-                    * velocity_gain
-                    * wet.next();
-                for (ch, channel) in channels[..channel_count].iter_mut().enumerate() {
-                    channel[start + i] += rendered[i] * level * pans[ch];
+            for (ch, channel) in channels[..channel_count].iter_mut().enumerate() {
+                let gain = velocity_gain * pans[ch];
+                for ((sample, &voice), &wet) in channel[start..end]
+                    .iter_mut()
+                    .zip(rendered)
+                    .zip(&self.wet_levels[..len])
+                {
+                    *sample += voice * wet * gain;
                 }
             }
-        }
-        for _ in 0..len {
-            self.wet_gain.next();
         }
         self.voices.retire_finished();
     }

@@ -100,6 +100,7 @@ impl VocoderEngine {
 
     fn attack_gain(&self, controls: &[VoiceControl; MAX_VOICES]) -> f32 {
         let mut shifted = 0;
+        let mut unison = 0;
         for (voice, control) in self.voices.iter().zip(controls) {
             if !control.active || !voice.initialised {
                 continue;
@@ -107,11 +108,13 @@ impl VocoderEngine {
             if control.pitch != 1.0 {
                 shifted += 1;
             } else if control.formant_ratio == 1.0 {
-                return 0.0;
+                unison = 1;
             }
         }
-        // The delayed attack copies are coherent, even when the shifted voices are not.
-        1.0 / shifted.max(1) as f32
+        // The delayed attack copies, and a unison voice's attack, add in amplitude while the
+        // sustained voices add in power. Bring the attack to the sustain's sqrt(n).
+        let voices = (shifted + unison) as f32;
+        (voices.sqrt() - unison as f32) / shifted.max(1) as f32
     }
 }
 

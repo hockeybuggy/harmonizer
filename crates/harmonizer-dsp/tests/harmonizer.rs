@@ -1,4 +1,7 @@
+mod support;
+
 use harmonizer_dsp::{Harmonizer, Mode, Params, Quality};
+use support::{VOWEL_AH, vowel};
 
 const SAMPLE_RATE: f32 = 48_000.0;
 
@@ -278,4 +281,80 @@ fn release_all_clears_sustain_pedal() {
     let after = run(&mut harmonizer, &input);
     assert!(rms(&after[12_000..]) < 1e-6);
     assert!(harmonizer.voices().active().next().is_none());
+}
+
+fn noise(len: usize) -> Vec<f32> {
+    let mut seed = 7u32;
+    (0..len)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5) * 0.5
+        })
+        .collect()
+}
+
+fn db(ratio: f32) -> f32 {
+    20.0 * ratio.log10()
+}
+
+fn steady_level(mode: Mode, input: &[f32], notes: &[u8]) -> f32 {
+    let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+    harmonizer.set_params(Params {
+        mode,
+        ..Params::default()
+    });
+    for &note in notes {
+        harmonizer.note_on(note, 1.0);
+    }
+    let out = run(&mut harmonizer, input);
+    rms(&out[harmonizer.latency() + 9_600..])
+}
+
+#[test]
+fn chords_are_as_loud_as_a_single_voice() {
+    let vowel = vowel(196.0, &VOWEL_AH, 48_000);
+    let noise = noise(48_000);
+    for mode in [Mode::Absolute, Mode::Relative] {
+        for (name, input) in [("vowel", &vowel), ("noise", &noise)] {
+            let notes = [62, 65, 69];
+            // Each note alone can differ in level, so compare with their average power.
+            let single = (notes
+                .iter()
+                .map(|&note| steady_level(mode, input, &[note]).powi(2))
+                .sum::<f32>()
+                / notes.len() as f32)
+                .sqrt();
+            let triad = steady_level(mode, input, &notes);
+            let change = db(triad / single);
+            assert!(
+                change.abs() < 1.0,
+                "{mode:?} {name}: triad is {change:+.1} dB against one voice"
+            );
+        }
+    }
+}
+
+#[test]
+fn adding_notes_does_not_swell() {
+    let input = vowel(196.0, &VOWEL_AH, 48_000);
+    let onset = 24_000;
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+        harmonizer.set_params(Params {
+            mode,
+            ..Params::default()
+        });
+        harmonizer.note_on(62, 1.0);
+        let mut out = run(&mut harmonizer, &input[..onset]);
+        harmonizer.note_on(65, 1.0);
+        harmonizer.note_on(69, 1.0);
+        out.extend(run(&mut harmonizer, &input[onset..]));
+        let before = rms(&out[onset - 4_800..onset]);
+        let loudest = out[onset..onset + 9_600]
+            .chunks(480)
+            .map(rms)
+            .fold(0.0, f32::max);
+        let swell = db(loudest / before);
+        assert!(swell < 2.5, "{mode:?}: swelled {swell:+.1} dB");
+    }
 }

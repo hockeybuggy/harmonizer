@@ -148,9 +148,10 @@ impl Engine for PsolaEngine {
             }
         }
 
-        // Every voice passes unvoiced input through unshifted, and identical copies add
-        // coherently, so share that passthrough between them to keep consonants at their level.
-        let passthrough_target = 1.0 / count.max(1) as f32;
+        // Every voice passes unvoiced input through unshifted. Identical copies add in amplitude
+        // while shifted voices add in power, so scale by 1/sqrt(n) to keep consonants as loud as
+        // the vowels around them.
+        let passthrough_target = (count.max(1) as f32).sqrt().recip();
         for (i, &sample) in input.iter().enumerate() {
             self.analyse_sample(sample);
             self.passthrough_gain +=

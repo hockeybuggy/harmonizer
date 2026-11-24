@@ -537,7 +537,7 @@ fn unvoiced_output_is_exactly_delayed() {
 }
 
 #[test]
-fn unvoiced_passthrough_is_shared_between_voices() {
+fn unvoiced_passthrough_adds_up_like_independent_voices() {
     let input = noise(3 * SETTLE);
     let mut engine = PsolaEngine::new(SAMPLE_RATE, Quality::Balanced);
     let latency = engine.latency();
@@ -554,6 +554,7 @@ fn unvoiced_passthrough_is_shared_between_voices() {
         .skip(settled)
     {
         let sum: f32 = output[..3].iter().map(|voice| voice[n + latency]).sum();
+        let expected = expected * 3.0_f32.sqrt();
         assert!(
             (sum - expected).abs() < 1e-5,
             "sample {n}: {sum} vs {expected}"
