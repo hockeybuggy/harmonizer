@@ -63,6 +63,29 @@ fn dry_signal_is_delayed_by_reported_latency() {
 }
 
 #[test]
+fn reset_clears_pitch_bend_from_the_previous_transport_position() {
+    let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 512);
+    harmonizer.set_params(Params {
+        mode: Mode::Relative,
+        ..Params::default()
+    });
+    let input = sine(220.0, 12_288);
+    harmonizer.note_on(60, 1.0);
+    let expected = run(&mut harmonizer, &input);
+
+    harmonizer.set_pitch_bend(1.0);
+    harmonizer.reset();
+    harmonizer.note_on(60, 1.0);
+    let actual = run(&mut harmonizer, &input);
+    let max_error = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f32::max);
+    assert!(max_error < 1e-5, "peak error {max_error}");
+}
+
+#[test]
 fn held_note_produces_output_and_release_silences_it() {
     for mode in [Mode::Absolute, Mode::Relative] {
         let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);

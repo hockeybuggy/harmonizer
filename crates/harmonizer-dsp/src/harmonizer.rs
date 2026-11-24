@@ -129,6 +129,7 @@ impl Harmonizer {
             delay.reset();
         }
         self.voices.kill_all();
+        self.pitch_bend = 0.0;
         self.wet_gain.snap();
         self.dry_gain.snap();
     }
