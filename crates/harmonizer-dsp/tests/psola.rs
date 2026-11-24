@@ -379,6 +379,22 @@ fn unity_pitch_output_aligns_at_reported_latency() {
 }
 
 #[test]
+fn empty_block_does_not_reset_a_sounding_voice() {
+    let input = vowel(220.0, &VOWEL_AH, 2 * SETTLE);
+    let render_with = |empty| {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, Quality::Balanced);
+        let active = voices(&[330.0], 1.0);
+        render(&mut engine, &input[..SETTLE], &active, 256);
+        if empty {
+            let mut buffers = harmonizer_dsp::VoiceBuffers::new(1);
+            engine.process(&[], &voices(&[], 1.0), &mut buffers);
+        }
+        render(&mut engine, &input[SETTLE..], &active, 256)
+    };
+    assert_eq!(render_with(true)[0], render_with(false)[0]);
+}
+
+#[test]
 fn output_is_independent_of_block_size() {
     let mut input = noise(SETTLE);
     input.extend(vibrato_vowel(2 * SETTLE));

@@ -99,6 +99,9 @@ impl Engine for PsolaEngine {
         voices: &[VoiceControl; MAX_VOICES],
         out: &mut VoiceBuffers,
     ) {
+        if input.is_empty() {
+            return;
+        }
         let mut slots = [0; MAX_VOICES];
         let mut count = 0;
         for (slot, control) in voices.iter().enumerate() {
