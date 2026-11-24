@@ -6,6 +6,7 @@ const SILENCE_THRESHOLD: f32 = 2.5e-4;
 // Mic hiss and room noise sit well above silence but shouldn't count as unpitched singing.
 const UNPITCHED_MIN_PEAK: f32 = 0.01;
 const METER_RELEASE_SECONDS: f32 = 0.3;
+const METER_FLOOR: f32 = 1e-3;
 const MISSING_AFTER_SECONDS: f32 = 1.5;
 const UNPITCHED_AFTER_SECONDS: f32 = 3.0;
 
@@ -88,6 +89,9 @@ impl InputWatch {
     pub fn observe(&mut self, peak: f32, samples: usize, sample_rate: f32, pitched: Option<bool>) {
         let release = (-(samples as f32) / (METER_RELEASE_SECONDS * sample_rate)).exp();
         self.meter = peak.max(self.meter * release);
+        if self.meter < METER_FLOOR {
+            self.meter = 0.0;
+        }
 
         let silent = peak < SILENCE_THRESHOLD;
         self.silent_samples = if silent {
@@ -104,8 +108,11 @@ impl InputWatch {
     /// Returns whether anything visible changed.
     pub fn publish(&self, telemetry: &Telemetry, sample_rate: f32) -> bool {
         let seconds = |samples: u64| samples as f32 / sample_rate;
-        let previous = telemetry.input_meter.swap(self.meter, Ordering::Relaxed);
-        let mut changed = (self.meter - previous).abs() > 0.05 * previous.max(1e-3);
+        let previous = telemetry.input_meter.load(Ordering::Relaxed);
+        let mut changed = (self.meter - previous).abs() > 0.05 * previous.max(METER_FLOOR);
+        if changed {
+            telemetry.input_meter.store(self.meter, Ordering::Relaxed);
+        }
         for (flag, value) in [
             (
                 &telemetry.input_missing,
@@ -143,6 +150,24 @@ mod tests {
             telemetry.input_missing.load(Ordering::Relaxed),
             telemetry.input_unpitched.load(Ordering::Relaxed),
         )
+    }
+
+    #[test]
+    fn meter_repaints_during_a_small_block_decay() {
+        let mut watch = InputWatch::default();
+        let telemetry = Telemetry::default();
+        watch.observe(1.0, BLOCK, RATE, Some(true));
+        assert!(watch.publish(&telemetry, RATE));
+        let mut repaints = 0;
+        for _ in 0..30 {
+            watch.observe(0.0, BLOCK, RATE, Some(true));
+            repaints += usize::from(watch.publish(&telemetry, RATE));
+        }
+        assert!(repaints > 0, "no repaint during a 300 ms decay");
+        assert!(telemetry.input_meter.load(Ordering::Relaxed) < 0.4);
+        feed(&mut watch, 30.0, 0.0, Some(false));
+        watch.publish(&telemetry, RATE);
+        assert_eq!(telemetry.input_meter.load(Ordering::Relaxed), 0.0);
     }
 
     #[test]
