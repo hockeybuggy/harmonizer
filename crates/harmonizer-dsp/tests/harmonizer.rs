@@ -154,6 +154,47 @@ fn pedal_up_keeps_held_key_sounding_while_releasing_sustained_key() {
 }
 
 #[test]
+fn pedal_release_does_not_change_other_voices_with_block_size() {
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut input = vec![0.0; 16_384];
+        let mut seed = 43u32;
+        for (i, sample) in input[4_400..6_000].iter_mut().enumerate() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *sample = ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5) * (-(i as f32) / 400.0).exp();
+        }
+        let render = |block_size| {
+            let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 4_096);
+            harmonizer.set_params(Params {
+                mode,
+                attack_ms: 1.0,
+                release_ms: 5.0,
+                ..Params::default()
+            });
+            harmonizer.set_sustain(true);
+            harmonizer.note_on(60, 1.0);
+            harmonizer.note_on(64, 1.0);
+            let mut output = input.clone();
+            harmonizer.process(&mut [&mut output[..4_096]]);
+            harmonizer.note_off(60);
+            harmonizer.set_sustain(false);
+            for block in output[4_096..].chunks_mut(block_size) {
+                harmonizer.process(&mut [block]);
+            }
+            output
+        };
+        let expected = render(1);
+        for size in [7, 512, 131_072] {
+            let max_error = render(size)
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
+            assert!(max_error < 1e-5, "{mode:?}, block {size}: {max_error}");
+        }
+    }
+}
+
+#[test]
 fn retrigger_under_sustain_keeps_slot_and_output_continuity() {
     for mode in [Mode::Absolute, Mode::Relative] {
         let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
