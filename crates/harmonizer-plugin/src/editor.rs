@@ -11,13 +11,14 @@ use nice_plug_egui::{
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-const WINDOW_SIZE: LogicalSize<f32> = LogicalSize::new(620.0, 330.0);
+const WINDOW_SIZE: LogicalSize<f32> = LogicalSize::new(620.0, 350.0);
 const LOWEST_KEY: u8 = 24;
 const HIGHEST_KEY: u8 = 108;
 
 const BACKGROUND: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x24);
 const ACCENT: Color32 = Color32::from_rgb(0xf2, 0xb1, 0x34);
 const MUTED: Color32 = Color32::from_rgb(0x8a, 0x90, 0x9c);
+const CLIP: Color32 = Color32::from_rgb(0xe5, 0x48, 0x4d);
 
 pub fn default_state() -> Arc<EguiEditorState> {
     EguiEditorState::from_size(WINDOW_SIZE, 1.0)
@@ -28,6 +29,7 @@ pub fn create(
     telemetry: Arc<Telemetry>,
     state: Arc<EguiEditorState>,
     repaint: RepaintNotifier,
+    sidechain: bool,
 ) -> Option<EguiEditor<HarmonizerEditor>> {
     create_egui_editor(
         state,
@@ -36,6 +38,7 @@ pub fn create(
         HarmonizerEditor {
             params,
             telemetry,
+            sidechain,
             gui: None,
         },
     )
@@ -44,6 +47,7 @@ pub fn create(
 pub struct HarmonizerEditor {
     params: Arc<HarmonizerParams>,
     telemetry: Arc<Telemetry>,
+    sidechain: bool,
     gui: Option<GuiContext>,
 }
 
@@ -111,12 +115,16 @@ impl HarmonizerEditor {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
+                    self.input_meter(ui);
                     ui.label(egui::RichText::new(self.status_text(relative)).color(MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new(self.latency_text()).color(MUTED));
                     });
                 });
 
+                if let Some(hint) = self.hint(relative) {
+                    ui.label(egui::RichText::new(hint).color(ACCENT));
+                }
                 ui.add_space(6.0);
                 self.keyboard(ui, relative);
                 ui.add_space(10.0);
@@ -178,6 +186,45 @@ impl HarmonizerEditor {
             )
         } else {
             "Input  —".to_owned()
+        }
+    }
+
+    fn hint(&self, relative: bool) -> Option<&'static str> {
+        let telemetry = &self.telemetry;
+        if telemetry.input_missing.load(Ordering::Relaxed) {
+            return Some(if self.sidechain {
+                "No sidechain audio: choose a source track in the device's Sidechain menu"
+            } else {
+                "No audio coming in: play a clip on this track, or set its Monitor to In"
+            });
+        }
+        if !telemetry.notes_seen.load(Ordering::Relaxed) {
+            return Some(if self.sidechain {
+                "Waiting for notes: arm this track, or play a MIDI clip on it"
+            } else {
+                "Waiting for notes: set a MIDI track's MIDI To to this track and Harmonizer"
+            });
+        }
+        if !relative && telemetry.input_unpitched.load(Ordering::Relaxed) {
+            return Some(
+                "No clear pitch: Absolute needs one voice at a time; try Relative for chords",
+            );
+        }
+        None
+    }
+
+    fn input_meter(&self, ui: &mut egui::Ui) {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(48.0, 8.0), Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, CornerRadius::same(2), Color32::from_gray(50));
+        let level = self.telemetry.input_meter.load(Ordering::Relaxed);
+        let db = 20.0 * level.max(1e-6).log10();
+        let fill = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        if fill > 0.0 {
+            let mut bar = rect;
+            bar.set_width(rect.width() * fill);
+            let colour = if db > -1.0 { CLIP } else { ACCENT };
+            painter.rect_filled(bar, CornerRadius::same(2), colour);
         }
     }
 
@@ -326,21 +373,37 @@ mod tests {
     #[test]
     #[ignore = "needs a GPU; run with --ignored to write target/editor-*.png"]
     fn render_editor_snapshots() {
-        for mode in [ModeParam::Absolute, ModeParam::Relative] {
+        let cases = [
+            ("absolute", ModeParam::Absolute, false, true, false),
+            ("relative", ModeParam::Relative, false, true, false),
+            ("waiting", ModeParam::Absolute, false, false, false),
+            ("no-sidechain", ModeParam::Absolute, true, true, true),
+        ];
+        for (name, mode, sidechain, notes_seen, input_missing) in cases {
             let params = Arc::new(HarmonizerParams::default());
             if mode == ModeParam::Relative {
                 let setter = ParamSetter::new(&NoHost);
                 setter.set_parameter(&params.mode, mode);
             }
             let telemetry = Arc::new(Telemetry::default());
-            telemetry.detected_pitch.store(221.3, Ordering::Relaxed);
             telemetry.latency_samples.store(1200, Ordering::Relaxed);
-            for (note, level) in [(57, 1.0), (60, 0.9), (64, 0.6), (67, 0.3)] {
-                telemetry.note_levels[note].store(level, Ordering::Relaxed);
+            telemetry.notes_seen.store(notes_seen, Ordering::Relaxed);
+            telemetry
+                .input_missing
+                .store(input_missing, Ordering::Relaxed);
+            if !input_missing {
+                telemetry.detected_pitch.store(221.3, Ordering::Relaxed);
+                telemetry.input_meter.store(0.3, Ordering::Relaxed);
+            }
+            if notes_seen && !input_missing {
+                for (note, level) in [(57, 1.0), (60, 0.9), (64, 0.6), (67, 0.3)] {
+                    telemetry.note_levels[note].store(level, Ordering::Relaxed);
+                }
             }
             let editor = HarmonizerEditor {
                 params,
                 telemetry,
+                sidechain,
                 gui: None,
             };
             let host = NoHost;
@@ -350,10 +413,9 @@ mod tests {
             harness.run();
             let image = harness.render().expect("render editor");
             let path = format!(
-                "{}/../../target/editor-{mode:?}.png",
+                "{}/../../target/editor-{name}.png",
                 env!("CARGO_MANIFEST_DIR")
-            )
-            .to_lowercase();
+            );
             image.save(&path).unwrap();
         }
     }

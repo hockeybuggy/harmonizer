@@ -9,7 +9,7 @@ mod params;
 mod telemetry;
 
 pub use params::HarmonizerParams;
-use telemetry::Telemetry;
+use telemetry::{InputWatch, Telemetry};
 
 /// The same harmonizer packaged two ways, because hosts differ in how they deliver MIDI to an
 /// audio effect. `Fx` sits on the audio track and takes MIDI routed to it; `Instrument` sits on a
@@ -70,6 +70,7 @@ pub struct HarmonizerPlugin<V: Variant> {
     repaint: RepaintNotifier,
     harmonizer: Option<Harmonizer>,
     reported_latency: u32,
+    input_watch: InputWatch,
     _variant: PhantomData<V>,
 }
 
@@ -82,6 +83,7 @@ impl<V: Variant> Default for HarmonizerPlugin<V> {
             repaint: RepaintNotifier::new(),
             harmonizer: None,
             reported_latency: 0,
+            input_watch: InputWatch::default(),
             _variant: PhantomData,
         }
     }
@@ -137,6 +139,7 @@ impl<V: Variant> Plugin for HarmonizerPlugin<V> {
             self.telemetry.clone(),
             self.editor_state.clone(),
             self.repaint.clone(),
+            V::SIDECHAIN_INPUT,
         )
     }
 
@@ -199,12 +202,17 @@ impl<V: Variant> Plugin for HarmonizerPlugin<V> {
             }
         }
 
+        let input_peak = InputWatch::peak(channels);
+
         let mut next_event = context.next_event();
         let mut block_start = 0;
         while block_start < num_samples {
             while let Some(event) = next_event {
                 if event.timing() as usize > block_start {
                     break;
+                }
+                if let NoteEvent::NoteOn { .. } = event {
+                    self.input_watch.note_received();
                 }
                 handle_event(harmonizer, event);
                 next_event = context.next_event();
@@ -225,12 +233,25 @@ impl<V: Variant> Plugin for HarmonizerPlugin<V> {
         }
         // Events can arrive after the last sample, e.g. a note off at the very end of a block.
         while let Some(event) = next_event {
+            if let NoteEvent::NoteOn { .. } = event {
+                self.input_watch.note_received();
+            }
             handle_event(harmonizer, event);
             next_event = context.next_event();
         }
 
-        if self.editor_state.is_open() && self.telemetry.publish(harmonizer) {
-            self.repaint.request_repaint();
+        let pitched = (harmonizer.params().mode == Mode::Absolute)
+            .then(|| harmonizer.detected_pitch().is_some());
+        self.input_watch
+            .observe(input_peak, num_samples, harmonizer.sample_rate(), pitched);
+
+        if self.editor_state.is_open() {
+            let input_changed = self
+                .input_watch
+                .publish(&self.telemetry, harmonizer.sample_rate());
+            if self.telemetry.publish(harmonizer) | input_changed {
+                self.repaint.request_repaint();
+            }
         }
 
         ProcessStatus::Normal

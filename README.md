@@ -34,30 +34,52 @@ and rescan. The bundle contains two plugins with the same sound and controls:
 
 ## Using it in Ableton Live
 
+The harmonizer needs two things: audio to re-pitch, and MIDI notes saying
+which pitches to make. With **Dry** at −∞ (the default) it's silent until both
+arrive. The editor says which one is missing.
+
 ### Audio effect (Harmonizer)
 
-1. Put **Harmonizer** on the audio track (e.g. your vocal).
-2. Create a MIDI track for the notes. Set its **MIDI To** to the vocal track,
-   and the second chooser to **Harmonizer**.
-3. Arm the MIDI track (or set its monitor to **In**) and play or record notes.
+1. Put **Harmonizer** on the audio track you want harmonized. To sing live,
+   set that track's input to your microphone and its **Monitor** to **In**
+   (or **Auto**, then arm it). Use headphones, or the harmony will feed back
+   through the mic.
+2. Create a MIDI track for the notes. Set its **MIDI To** to the audio track,
+   and the chooser underneath to **Harmonizer**.
+3. Arm the MIDI track to play notes from a keyboard (or Live's computer
+   keyboard), or give it a MIDI clip.
 
 ### Instrument (Harmonizer Instrument)
 
-1. Put **Harmonizer Instrument** on a MIDI track.
-2. In the device's title bar, open the sidechain section and pick the audio
-   track you want harmonized as the source.
-3. Play or record notes on that MIDI track. Mute the source track, or turn
-   **Dry** up on the harmonizer, depending on whether you want the original
-   to be heard.
+1. Put **Harmonizer Instrument** on a MIDI track. Arm it to play notes, or give
+   it a MIDI clip.
+2. In the device's **Sidechain** menu, choose the track to harmonize.
+3. That track must be producing audio: a playing clip, or a microphone with
+   **Monitor** on **In**. Mute it, or turn **Dry** up on the harmonizer,
+   depending on whether you want to hear the original too.
+
+### If it's silent
+
+The line under the title explains what's missing:
+
+- *No audio coming in* or *No sidechain audio*: nothing reaches the plugin.
+  Check the track input, its Monitor setting, and the sidechain source.
+- *Waiting for notes*: no MIDI has arrived. Check MIDI To, and that the MIDI
+  track is armed or playing a clip.
+- *No clear pitch*: Absolute mode follows a single voice. Use Relative for
+  chords, drums and other polyphonic input.
+
+The small bar left of the status line is the input level.
 
 ### Tips
 
-- With **Dry** at −∞ (the default) you only hear the harmony voices; raise it to
-  blend the original in at the same latency.
+- Raise **Dry** to blend the original in at the same latency.
 - **Low latency** is for playing live through monitors; **High quality** is for
   mixing, where Live's delay compensation hides the latency.
 - **Spread** pans voices by pitch, low notes left and high notes right.
 - Pitch bend moves every voice by up to **Bend range** semitones.
+- Each voice is as loud as the input, so a three-note chord peaks a few dB
+  above it. Lower **Wet** if the track clips.
 
 ## Offline rendering
 
