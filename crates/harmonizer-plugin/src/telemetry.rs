@@ -80,6 +80,15 @@ impl InputWatch {
         self.notes_seen = true;
     }
 
+    /// Forgets levels and timers. Whether notes have arrived survives, because a reset (for
+    /// example the host reacting to a latency change) doesn't change how MIDI is routed.
+    pub fn reset(&mut self) {
+        *self = Self {
+            notes_seen: self.notes_seen,
+            ..Self::default()
+        };
+    }
+
     pub fn peak(input: &[&mut [f32]]) -> f32 {
         input
             .iter()

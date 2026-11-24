@@ -163,7 +163,7 @@ impl<V: Variant> Plugin for HarmonizerPlugin<V> {
     }
 
     fn reset(&mut self) {
-        self.input_watch = InputWatch::default();
+        self.input_watch.reset();
         if let Some(harmonizer) = &mut self.harmonizer {
             harmonizer.reset();
             let input_changed = self
@@ -300,7 +300,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
-    fn reset_clears_the_editors_input_history() {
+    fn reset_clears_the_editors_input_history_but_not_routing() {
         let mut plugin = HarmonizerPlugin::<Fx> {
             harmonizer: Some(Harmonizer::new(48_000.0, 512)),
             ..Default::default()
@@ -314,11 +314,8 @@ mod tests {
         assert!(plugin.telemetry.input_unpitched.load(Ordering::Relaxed));
 
         plugin.reset();
-        assert!(!plugin.telemetry.notes_seen.load(Ordering::Relaxed));
+        assert!(plugin.telemetry.notes_seen.load(Ordering::Relaxed));
         assert!(!plugin.telemetry.input_unpitched.load(Ordering::Relaxed));
         assert_eq!(plugin.telemetry.input_meter.load(Ordering::Relaxed), 0.0);
-
-        plugin.input_watch.publish(&plugin.telemetry, 48_000.0);
-        assert!(!plugin.telemetry.notes_seen.load(Ordering::Relaxed));
     }
 }
