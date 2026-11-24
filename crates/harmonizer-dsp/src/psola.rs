@@ -23,17 +23,16 @@ pub struct PsolaEngine {
 impl PsolaEngine {
     pub fn new(sample_rate: f32, quality: Quality) -> Self {
         let (latency_ms, min_hz, window_ms) = match quality {
-            Quality::LowLatency => (12.0, 160.0, 12.0),
-            Quality::Balanced => (25.0, 80.0, 24.0),
-            Quality::HighQuality => (45.0, 60.0, 40.0),
+            Quality::LowLatency => (16.0, 80.0, 26.0),
+            Quality::Balanced => (25.0, 60.0, 36.0),
+            Quality::HighQuality => (45.0, 50.0, 45.0),
         };
         let latency = (sample_rate * latency_ms / 1000.0).round() as usize;
         let tracker = PitchTracker::new(sample_rate, min_hz, window_ms);
         let max_lag = tracker.max_lag();
-        // Grains are queued before their centres; reserve the remaining lookahead for the
-        // nearest analysis mark and its peak search.
-        let lead = latency.saturating_sub((0.9 * max_lag as f32).ceil() as usize);
-        let size = (latency + max_lag + lead + 4).next_power_of_two();
+        // A full grain radius takes priority over waiting for a newer analysis mark.
+        let lead = max_lag;
+        let size = (latency + 3 * max_lag + 4).next_power_of_two();
         let grain_capacity =
             (2.0 * lead as f32 * (4.0 * MAX_PITCH_HZ) / sample_rate).ceil() as usize + 4;
         Self {
@@ -293,7 +292,7 @@ impl AnalysisMarks {
             (Some(a), None) => a,
             (None, None) => return None,
         };
-        ((mark.centre - time).abs() <= f64::from(0.85 * mark.period)).then_some(*mark)
+        ((mark.centre - time).abs() <= f64::from(1.4 * mark.period)).then_some(*mark)
     }
 }
 
@@ -301,6 +300,7 @@ struct Grain {
     centre: f64,
     source: f64,
     inverse_radius: f32,
+    weight_floor: f32,
     formant_ratio: f64,
 }
 
@@ -338,9 +338,7 @@ impl Synthesis {
         latency: usize,
     ) {
         let formant_ratio = formant_ratio.clamp(0.5, 2.0);
-        let mut radius = (mark.period / formant_ratio)
-            .max(0.6 * target_period as f32)
-            .min(lead as f32);
+        let mut radius = (mark.period / formant_ratio).min(lead as f32);
         if formant_ratio > 1.0 {
             let available = latency as f64 - (mark.centre - centre) - 1.0;
             radius = radius.min(available as f32 / (formant_ratio - 1.0));
@@ -350,6 +348,8 @@ impl Synthesis {
                 centre,
                 source: mark.centre,
                 inverse_radius: radius.recip(),
+                // Keep the Hann taper when grains barely overlap or leave gaps.
+                weight_floor: (target_period as f32 / radius - 1.0).clamp(0.05, 1.0),
                 formant_ratio: f64::from(formant_ratio),
             });
         }
@@ -358,6 +358,7 @@ impl Synthesis {
     fn render(&mut self, time: i64, history: &History, window: &[f32; WINDOW_STEPS + 1]) -> f32 {
         let mut total = 0.0;
         let mut weight = 0.0;
+        let mut weighted_floor = 0.0;
         let mut i = 0;
         while i < self.grains.len() {
             let grain = &self.grains[i];
@@ -370,12 +371,14 @@ impl Synthesis {
                 let gain = a + (window[base + 1] - a) * (index - base as f32);
                 total += gain * history.sample_at(grain.source + offset * grain.formant_ratio);
                 weight += gain;
+                weighted_floor += gain * grain.weight_floor;
             } else if offset > 0.0 {
                 self.grains.swap_remove(i);
                 continue;
             }
             i += 1;
         }
-        total / weight.max(0.05)
+        // Blend the floors with the grains so a bend cannot change gain at a window edge.
+        total * weight / (weight * weight).max(weighted_floor).max(f32::MIN_POSITIVE)
     }
 }

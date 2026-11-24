@@ -73,11 +73,8 @@ fn assert_pitch(samples: &[f32], target: f32, tolerance: f32) {
 
 #[test]
 fn detector_tracks_periodic_waveforms() {
-    for (quality, min_hz) in Quality::ALL.into_iter().zip([160.0, 80.0, 60.0]) {
-        for hz in [80.0, 110.0, 220.0, 440.0, 880.0] {
-            if hz < min_hz {
-                continue;
-            }
+    for (quality, min_hz) in Quality::ALL.into_iter().zip([80.0, 60.0, 50.0]) {
+        for hz in [min_hz, 82.0, 110.0, 220.0, 440.0, 880.0, 1000.0] {
             for (name, input) in [
                 ("sine", sine(hz, SETTLE)),
                 ("sawtooth", sawtooth(hz, SETTLE)),
@@ -123,6 +120,77 @@ fn retunes_each_voice_to_its_own_target() {
         for (channel, target) in output.iter().zip(targets) {
             assert_pitch(&channel[SETTLE..], target, 10.0);
         }
+    }
+}
+
+#[test]
+fn retunes_low_e_on_every_preset() {
+    let target = 110.0;
+    let len = 3 * SETTLE;
+    for (waveform, input) in [
+        ("vowel", vowel(82.0, &VOWEL_AH, len)),
+        ("sawtooth", sawtooth(82.0, len)),
+    ] {
+        for quality in Quality::ALL {
+            let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+            let output = render(&mut engine, &input, &voices(&[target], 1.0), 256);
+            let steady = &output[0][SETTLE..];
+            assert_pitch(steady, target, 10.0);
+            let leakage = inharmonic_power(steady, target);
+            assert!(leakage < 0.001, "{quality:?} {waveform}: {leakage:.5}");
+            if quality == Quality::LowLatency {
+                assert!(engine.latency() <= (0.016 * SAMPLE_RATE) as usize);
+            }
+        }
+    }
+}
+
+fn inharmonic_power(samples: &[f32], target: f32) -> f32 {
+    let spacing = (target * samples.len() as f32 / SAMPLE_RATE).round() as usize;
+    let (mut outside, mut total) = (0.0, 0.0);
+    for (bin, magnitude) in magnitude_spectrum(samples).into_iter().enumerate().skip(2) {
+        let power = magnitude * magnitude;
+        total += power;
+        let offset = bin % spacing;
+        // A Hann window spreads each bin-centred partial into both neighbouring bins.
+        if offset.min(spacing - offset) > 1 {
+            outside += power;
+        }
+    }
+    outside / total
+}
+
+#[test]
+fn wide_shifts_stay_on_target_harmonics() {
+    let targets = [165.0, 110.0, 660.0, 990.0];
+    for source in [330.0, 327.0] {
+        let input = vowel(source, &VOWEL_AH, SETTLE + SAMPLE_RATE as usize);
+        for quality in Quality::ALL {
+            let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+            let output = render(&mut engine, &input, &voices(&targets, 1.0), 256);
+            for (channel, target) in output.iter().zip(targets) {
+                let steady = &channel[SETTLE..];
+                assert_pitch(&steady[..2 * SETTLE], target, 10.0);
+                let leakage = inharmonic_power(steady, target);
+                assert!(
+                    leakage < 0.0005,
+                    "{quality:?} {source} -> {target}: {leakage:.5}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn octave_and_fifth_down_preserves_quiet_grain_tails() {
+    let input = vowel(330.0, &VOWEL_AH, 3 * SETTLE);
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        let output = render(&mut engine, &input, &voices(&[110.0], 1.0), 256);
+        let cycle = &output[0][SETTLE..SETTLE + 480];
+        let quietest = cycle.windows(48).map(rms).fold(f32::INFINITY, f32::min);
+        let floor = quietest / rms(cycle);
+        assert!(floor < 0.01, "{quality:?}: {floor:.5}");
     }
 }
 
