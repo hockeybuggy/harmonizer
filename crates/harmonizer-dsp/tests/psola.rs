@@ -161,6 +161,24 @@ fn tracker_prefers_the_established_voice_over_a_drone() {
 }
 
 #[test]
+fn tracker_follows_a_clear_octave_drop_with_a_strong_second_harmonic() {
+    let lower: Vec<_> = sine(110.0, SETTLE * 3)
+        .iter()
+        .zip(sine(220.0, SETTLE * 3))
+        .map(|(fundamental, second)| 0.4 * fundamental + 0.84 * second)
+        .collect();
+    let controls = voices(&[], 1.0);
+    for quality in Quality::ALL {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        render(&mut engine, &sine(220.0, SETTLE), &controls, 256);
+        assert!(cents(engine.detected_pitch().unwrap(), 220.0).abs() < 10.0);
+        render(&mut engine, &lower, &controls, 256);
+        let pitch = engine.detected_pitch().unwrap();
+        assert!(cents(pitch, 110.0).abs() < 10.0, "{quality:?}: {pitch} Hz");
+    }
+}
+
+#[test]
 fn retunes_each_voice_to_its_own_target() {
     let targets = [261.63, 130.81, 349.23, 440.0];
     let input = vowel(196.0, &VOWEL_AH, 3 * SETTLE);
@@ -518,6 +536,22 @@ fn unity_pitch_output_aligns_at_reported_latency() {
             .collect();
         assert!(rms(&difference) < 0.01 * rms(source), "{quality:?}");
     }
+}
+
+#[test]
+fn empty_block_does_not_reset_a_sounding_voice() {
+    let input = vowel(220.0, &VOWEL_AH, 2 * SETTLE);
+    let render_with = |empty| {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, Quality::Balanced);
+        let active = voices(&[330.0], 1.0);
+        render(&mut engine, &input[..SETTLE], &active, 256);
+        if empty {
+            let mut buffers = harmonizer_dsp::VoiceBuffers::new(1);
+            engine.process(&[], &voices(&[], 1.0), &mut buffers);
+        }
+        render(&mut engine, &input[SETTLE..], &active, 256)
+    };
+    assert_eq!(render_with(true)[0], render_with(false)[0]);
 }
 
 #[test]

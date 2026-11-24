@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 const SILENCE_THRESHOLD: f32 = 2.5e-4;
 // Mic hiss and room noise sit well above silence but shouldn't count as unpitched singing.
 const UNPITCHED_MIN_PEAK: f32 = 0.01;
+const LOUD_HOLD_SECONDS: f32 = 0.02;
 const METER_RELEASE_SECONDS: f32 = 0.3;
+const METER_FLOOR: f32 = 1e-3;
 const MISSING_AFTER_SECONDS: f32 = 1.5;
 const UNPITCHED_AFTER_SECONDS: f32 = 3.0;
 
@@ -69,6 +71,7 @@ pub struct InputWatch {
     meter: f32,
     silent_samples: u64,
     unpitched_samples: u64,
+    loud_hold: usize,
     notes_seen: bool,
 }
 
@@ -86,8 +89,14 @@ impl InputWatch {
 
     /// `pitched` is whether absolute mode's tracker found a pitch, or `None` in relative mode.
     pub fn observe(&mut self, peak: f32, samples: usize, sample_rate: f32, pitched: Option<bool>) {
+        if samples == 0 {
+            return;
+        }
         let release = (-(samples as f32) / (METER_RELEASE_SECONDS * sample_rate)).exp();
         self.meter = peak.max(self.meter * release);
+        if self.meter < METER_FLOOR {
+            self.meter = 0.0;
+        }
 
         let silent = peak < SILENCE_THRESHOLD;
         self.silent_samples = if silent {
@@ -95,8 +104,13 @@ impl InputWatch {
         } else {
             0
         };
+        self.loud_hold = if peak >= UNPITCHED_MIN_PEAK {
+            (LOUD_HOLD_SECONDS * sample_rate).ceil() as usize
+        } else {
+            self.loud_hold.saturating_sub(samples)
+        };
         self.unpitched_samples = match pitched {
-            Some(false) if peak >= UNPITCHED_MIN_PEAK => self.unpitched_samples + samples as u64,
+            Some(false) if self.loud_hold > 0 => self.unpitched_samples + samples as u64,
             _ => 0,
         };
     }
@@ -104,8 +118,11 @@ impl InputWatch {
     /// Returns whether anything visible changed.
     pub fn publish(&self, telemetry: &Telemetry, sample_rate: f32) -> bool {
         let seconds = |samples: u64| samples as f32 / sample_rate;
-        let previous = telemetry.input_meter.swap(self.meter, Ordering::Relaxed);
-        let mut changed = (self.meter - previous).abs() > 0.05 * previous.max(1e-3);
+        let previous = telemetry.input_meter.load(Ordering::Relaxed);
+        let mut changed = (self.meter - previous).abs() > 0.05 * previous.max(METER_FLOOR);
+        if changed {
+            telemetry.input_meter.store(self.meter, Ordering::Relaxed);
+        }
         for (flag, value) in [
             (
                 &telemetry.input_missing,
@@ -146,6 +163,24 @@ mod tests {
     }
 
     #[test]
+    fn meter_repaints_during_a_small_block_decay() {
+        let mut watch = InputWatch::default();
+        let telemetry = Telemetry::default();
+        watch.observe(1.0, BLOCK, RATE, Some(true));
+        assert!(watch.publish(&telemetry, RATE));
+        let mut repaints = 0;
+        for _ in 0..30 {
+            watch.observe(0.0, BLOCK, RATE, Some(true));
+            repaints += usize::from(watch.publish(&telemetry, RATE));
+        }
+        assert!(repaints > 0, "no repaint during a 300 ms decay");
+        assert!(telemetry.input_meter.load(Ordering::Relaxed) < 0.4);
+        feed(&mut watch, 30.0, 0.0, Some(false));
+        watch.publish(&telemetry, RATE);
+        assert_eq!(telemetry.input_meter.load(Ordering::Relaxed), 0.0);
+    }
+
+    #[test]
     fn flags_missing_input_only_after_sustained_silence() {
         let mut watch = InputWatch::default();
         feed(&mut watch, 1.4, 0.0, Some(false));
@@ -154,6 +189,25 @@ mod tests {
         assert_eq!(flags(&watch), (true, false));
         feed(&mut watch, 0.01, 0.5, Some(true));
         assert_eq!(flags(&watch), (false, false));
+    }
+
+    #[test]
+    fn empty_callback_preserves_unpitched_status() {
+        let mut watch = InputWatch::default();
+        feed(&mut watch, 3.1, 0.5, Some(false));
+        assert_eq!(flags(&watch), (false, true));
+        watch.observe(0.0, 0, RATE, Some(false));
+        assert_eq!(flags(&watch), (false, true));
+    }
+
+    #[test]
+    fn unpitched_hint_survives_quiet_samples_in_small_callbacks() {
+        let mut watch = InputWatch::default();
+        for index in 0..(3.1 * RATE) as usize {
+            let peak = if index % 3 == 0 { 0.4 } else { 0.0 };
+            watch.observe(peak, 1, RATE, Some(false));
+        }
+        assert_eq!(flags(&watch), (false, true));
     }
 
     #[test]

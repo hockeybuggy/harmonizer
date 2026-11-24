@@ -198,6 +198,34 @@ fn preserves_isolated_attack_timing_when_transposing() {
 }
 
 #[test]
+fn new_voice_does_not_attenuate_attack_before_its_first_frame() {
+    let mut engine = VocoderEngine::new(SAMPLE_RATE, Quality::Balanced);
+    let onset = 6_272;
+    let mut input = vec![0.0; onset];
+    input.extend(sine(1_000.0, 4_096));
+    let delayed_onset = onset + engine.latency();
+    let controls = voices(&[1.25], 1.0);
+    let expected = render(&mut engine, &input, &controls, 512);
+    for pitch in [1.5, 1.0] {
+        engine.reset();
+        render(&mut engine, &input[..delayed_onset], &controls, 512);
+        let active = voices(&[1.25, pitch], 1.0);
+        let tail = &input[delayed_onset..delayed_onset + 1_024];
+        let output = render(&mut engine, tail, &active, 1_024);
+        let error = output[0][..64]
+            .iter()
+            .zip(&expected[0][delayed_onset..])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(error < 1e-5, "pitch {pitch}: peak error {error}");
+        engine.reset();
+        render(&mut engine, &input[..delayed_onset], &controls, 512);
+        let split = render(&mut engine, tail, &active, 1);
+        assert_eq!(output[0], split[0], "pitch {pitch}");
+    }
+}
+
+#[test]
 fn rendering_is_invariant_to_block_size() {
     let input = vowel(150.0, &VOWEL_AH, 12_337);
     let controls = voices(&[1.0, 1.25, 1.5], 0.85);

@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{ops::RangeInclusive, sync::Arc};
 
 use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 pub(crate) const MAX_PITCH_HZ: f32 = 1000.0;
+const OCTAVE_DOWN: RangeInclusive<f32> = 1.82..=2.18;
 
 pub(crate) struct PitchTracker {
     window: Vec<f32>,
@@ -157,6 +158,13 @@ impl PitchTracker {
         // A competing lower pitch can have a better recurrence without being the lead voice.
         let lag = match (first, nearby) {
             (Some(a), Some(b)) if (a as f32) < 0.8 * b as f32 => Some(a),
+            (Some(a), Some(b))
+                if OCTAVE_DOWN.contains(&(a as f32 / b as f32))
+                    && nsdf[a] >= 0.90
+                    && nsdf[a] - nsdf[b] >= 0.25 =>
+            {
+                Some(a)
+            }
             (first, nearby) => nearby.or(first),
         };
         let candidate = lag.map(|lag| {
@@ -171,7 +179,7 @@ impl PitchTracker {
             let ratio = candidate / previous;
             let direction = if (0.46..=0.55).contains(&ratio) {
                 -1
-            } else if (1.82..=2.18).contains(&ratio) {
+            } else if OCTAVE_DOWN.contains(&ratio) {
                 1
             } else {
                 0

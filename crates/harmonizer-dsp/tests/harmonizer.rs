@@ -63,6 +63,29 @@ fn dry_signal_is_delayed_by_reported_latency() {
 }
 
 #[test]
+fn reset_clears_pitch_bend_from_the_previous_transport_position() {
+    let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 512);
+    harmonizer.set_params(Params {
+        mode: Mode::Relative,
+        ..Params::default()
+    });
+    let input = sine(220.0, 12_288);
+    harmonizer.note_on(60, 1.0);
+    let expected = run(&mut harmonizer, &input);
+
+    harmonizer.set_pitch_bend(1.0);
+    harmonizer.reset();
+    harmonizer.note_on(60, 1.0);
+    let actual = run(&mut harmonizer, &input);
+    let max_error = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f32::max);
+    assert!(max_error < 1e-5, "peak error {max_error}");
+}
+
+#[test]
 fn held_note_produces_output_and_release_silences_it() {
     for mode in [Mode::Absolute, Mode::Relative] {
         let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
@@ -150,6 +173,47 @@ fn pedal_up_keeps_held_key_sounding_while_releasing_sustained_key() {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].1.note, 64);
         assert!(active[0].1.held && !active[0].1.sustained);
+    }
+}
+
+#[test]
+fn pedal_release_does_not_change_other_voices_with_block_size() {
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut input = vec![0.0; 16_384];
+        let mut seed = 43u32;
+        for (i, sample) in input[4_400..6_000].iter_mut().enumerate() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *sample = ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5) * (-(i as f32) / 400.0).exp();
+        }
+        let render = |block_size| {
+            let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 4_096);
+            harmonizer.set_params(Params {
+                mode,
+                attack_ms: 1.0,
+                release_ms: 5.0,
+                ..Params::default()
+            });
+            harmonizer.set_sustain(true);
+            harmonizer.note_on(60, 1.0);
+            harmonizer.note_on(64, 1.0);
+            let mut output = input.clone();
+            harmonizer.process(&mut [&mut output[..4_096]]);
+            harmonizer.note_off(60);
+            harmonizer.set_sustain(false);
+            for block in output[4_096..].chunks_mut(block_size) {
+                harmonizer.process(&mut [block]);
+            }
+            output
+        };
+        let expected = render(1);
+        for size in [7, 512, 131_072] {
+            let max_error = render(size)
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
+            assert!(max_error < 1e-5, "{mode:?}, block {size}: {max_error}");
+        }
     }
 }
 

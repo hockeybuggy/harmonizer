@@ -129,6 +129,7 @@ impl Harmonizer {
             delay.reset();
         }
         self.voices.kill_all();
+        self.pitch_bend = 0.0;
         self.wet_gain.snap();
         self.dry_gain.snap();
     }
@@ -138,15 +139,44 @@ impl Harmonizer {
             return;
         };
         let max_block = self.buffers.max_block();
+        let release_step = envelope_step(self.sample_rate, self.params.release_ms);
         let mut start = 0;
         while start < len {
-            let end = (start + max_block).min(len);
-            self.process_block(channels, start, end);
+            let limit = (len - start).min(max_block);
+            let end = start + self.samples_until_retirement(limit, release_step);
+            self.process_block(channels, start, end, release_step);
             start = end;
         }
     }
 
-    fn process_block(&mut self, channels: &mut [&mut [f32]], start: usize, end: usize) {
+    fn samples_until_retirement(&self, limit: usize, release_step: f32) -> usize {
+        let Some(mut level) = self
+            .voices
+            .active()
+            .filter(|(_, voice)| !voice.held && !voice.sustained)
+            .map(|(_, voice)| voice.envelope)
+            .min_by(f32::total_cmp)
+        else {
+            return limit;
+        };
+        // Both engines share unshifted audio across voices, so retire at the same sample
+        // regardless of callback size. Repeated subtraction matches the envelope's rounding.
+        for samples in 1..limit {
+            level -= release_step;
+            if level <= 0.0 {
+                return samples;
+            }
+        }
+        limit
+    }
+
+    fn process_block(
+        &mut self,
+        channels: &mut [&mut [f32]],
+        start: usize,
+        end: usize,
+        release_step: f32,
+    ) {
         let len = end - start;
         let channel_count = channels.len().min(2);
         let scale = 1.0 / channel_count as f32;
@@ -173,7 +203,6 @@ impl Harmonizer {
         let latency = engine.latency();
 
         let attack_step = envelope_step(self.sample_rate, self.params.attack_ms);
-        let release_step = envelope_step(self.sample_rate, self.params.release_ms);
         let spread = self.params.stereo_spread;
         let sensitivity = self.params.velocity_sensitivity;
 
