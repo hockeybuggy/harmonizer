@@ -14,8 +14,12 @@ a VST3 plugin (for Ableton Live) and an offline CLI.
   - `vocoder.rs` — relative mode: phase vocoder with formant preservation.
 - `crates/harmonizer-plugin` — VST3 wrapper (nice-plug) and egui editor.
 - `crates/harmonizer-cli` — offline renderer (`harmonizer` binary).
+- `crates/vst3-smoke` — a minimal VST3 host that loads the built bundle,
+  drives both plugin classes like a DAW, and fails on any defect.
 - `xtask` — `cargo xtask bundle harmonizer-plugin --release` builds
   `target/bundled/Harmonizer.vst3`.
+- `vendor/nice-plug` — nice-plug 0.4.2 with a VST3 bus-index fix, wired in
+  through `[patch.crates-io]` (see `vendor/README.md`).
 
 ## Rules
 
@@ -38,5 +42,7 @@ a VST3 plugin (for Ableton Live) and an offline CLI.
 cargo test -p harmonizer-dsp
 cargo clippy --workspace --all-targets
 cargo xtask bundle harmonizer-plugin --release
+cargo run --release -p vst3-smoke -- target/bundled/Harmonizer.vst3
 cargo run --release -p harmonizer-cli -- --help
+cargo test -p harmonizer-plugin -- --ignored  # writes target/editor-*.png
 ```

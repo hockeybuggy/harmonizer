@@ -74,9 +74,17 @@ MIDI note 60.
 ## Development
 
 ```sh
-cargo test -p harmonizer-dsp
+cargo test -p harmonizer-dsp -p harmonizer-cli
 cargo clippy --workspace --all-targets
+cargo xtask bundle harmonizer-plugin --release
+cargo run --release -p vst3-smoke -- target/bundled/Harmonizer.vst3
 ```
+
+`vst3-smoke` is a minimal VST3 host: it loads the bundle, checks both plugin
+classes' buses, parameters, latency reporting, MIDI-driven audio, state and
+editor, and exits non-zero on the first problem. Build the bundle without
+`--release` to also have nice-plug abort on any allocation in the audio
+callback.
 
 `crates/harmonizer-dsp` holds all the DSP with no plugin-framework
 dependencies; `crates/harmonizer-plugin` wraps it with
