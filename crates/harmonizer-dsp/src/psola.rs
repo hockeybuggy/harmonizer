@@ -72,9 +72,24 @@ impl PsolaEngine {
     fn analyse_sample(&mut self, sample: f32) {
         let index = self.history.index(self.time);
         self.history.samples[index] = sample;
+        let was_unvoiced = self.tracker.period().is_none();
         let (period, clarity) = self.tracker.push(sample);
         if let Some(clarity) = clarity {
             self.contour.update(period, clarity);
+            if let Some(period) = period.filter(|_| was_unvoiced) {
+                // The start of the detected cycle may still be in the latency buffer.
+                let lookback = self.tracker.onset_lookback(
+                    period,
+                    ((0.005 * self.sample_rate) as usize).min(self.latency),
+                );
+                for offset in 1..=lookback {
+                    let earlier = self.history.index(self.time - offset as i64);
+                    if self.history.periods[earlier] > 0.0 {
+                        break;
+                    }
+                    self.history.periods[earlier] = period;
+                }
+            }
         }
         self.history.periods[index] = period.unwrap_or(0.0);
         self.history.deviations[index] = self.contour.deviation;
