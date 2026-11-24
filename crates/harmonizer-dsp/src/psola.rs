@@ -7,6 +7,10 @@ use crate::pitch::{MAX_PITCH_HZ, PitchTracker, peak_offset};
 
 const WINDOW_STEPS: usize = 512;
 
+fn clear_inaudible(value: f32) -> f32 {
+    if value.abs() < 1e-20 { 0.0 } else { value }
+}
+
 pub struct PsolaEngine {
     sample_rate: f32,
     latency: usize,
@@ -241,7 +245,7 @@ impl AnalysisMarks {
 
     fn push(&mut self, history: &mut History, time: i64, mut sample: f32, period: Option<f32>) {
         for stage in &mut self.filter {
-            *stage += self.filter_step * (sample - *stage);
+            *stage = clear_inaudible(*stage + self.filter_step * (sample - *stage));
             sample = *stage;
         }
         let index = history.index(time);
@@ -439,8 +443,47 @@ impl LowCut {
         let difference = input - self.low_state;
         let band = self.a1 * self.band_state + self.a2 * difference;
         let low = self.low_state + self.a2 * self.band_state + self.a3 * difference;
-        self.band_state = 2.0 * band - self.band_state;
-        self.low_state = 2.0 * low - self.low_state;
+        self.band_state = clear_inaudible(2.0 * band - self.band_state);
+        self.low_state = clear_inaudible(2.0 * low - self.low_state);
         input - std::f32::consts::SQRT_2 * band - low
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pitch_mark_filter_has_no_denormal_tail_after_silence() {
+        let mut marks = AnalysisMarks::new(192_000.0, 8);
+        let mut history = History::new(8);
+        marks.push(&mut history, 0, 1.0, None);
+        for time in 1..192_000 {
+            marks.push(&mut history, time, 0.0, None);
+        }
+        assert!(
+            marks.filter.iter().all(|value| !value.is_subnormal()),
+            "filter states: {:?}",
+            marks.filter
+        );
+    }
+
+    #[test]
+    fn low_cut_has_no_denormal_tail_after_silence() {
+        let mut filter = LowCut::default();
+        filter.configure(110.0, 192_000.0);
+        filter.process(1.0);
+        let mut output = 0.0;
+        for _ in 0..192_000 {
+            output = filter.process(0.0);
+        }
+        assert!(
+            [filter.band_state, filter.low_state, output]
+                .iter()
+                .all(|value| !value.is_subnormal()),
+            "band state {}, low state {}, output {output}",
+            filter.band_state,
+            filter.low_state,
+        );
     }
 }
