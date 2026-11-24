@@ -14,6 +14,7 @@ pub struct VocoderEngine {
     input: Vec<f32>,
     cursor: usize,
     hop: usize,
+    transients: Transients,
     voices: [Voice; MAX_VOICES],
 }
 
@@ -53,6 +54,7 @@ impl VocoderEngine {
             input: vec![0.0; size],
             cursor: 0,
             hop,
+            transients: Transients::new(sample_rate, size, hop),
             voices: std::array::from_fn(|_| Voice::new(size, bins)),
         }
     }
@@ -106,6 +108,7 @@ impl Engine for VocoderEngine {
         self.input.fill(0.0);
         self.cursor = 0;
         self.analysis.previous_phase.fill(0.0);
+        self.transients.reset();
         for voice in &mut self.voices {
             voice.reset();
         }
@@ -124,33 +127,167 @@ impl Engine for VocoderEngine {
         if input.is_empty() {
             return;
         }
+        let mut shifted = 0;
+        let mut unison = false;
         for (voice, control) in self.voices.iter_mut().zip(controls) {
             if !control.active {
                 voice.suspended = true;
-            } else if voice.suspended {
+                continue;
+            }
+            if voice.suspended {
                 voice.reset();
             }
+            if control.pitch != 1.0 {
+                shifted += 1;
+            } else if control.formant_ratio == 1.0 {
+                unison = true;
+            }
         }
+        // The delayed attack copies are coherent, even when the shifted voices are not.
+        let attack_gain = if unison {
+            0.0
+        } else {
+            1.0 / shifted.max(1) as f32
+        };
         let mut offset = 0;
         while offset < input.len() {
             let count = (self.hop - self.cursor % self.hop).min(input.len() - offset);
             let end = self.cursor + count;
-            self.input[self.cursor..end].copy_from_slice(&input[offset..offset + count]);
+            let delay = &mut self.input[self.cursor..end];
+            let (mix, attack) = self.transients.advance(delay, attack_gain);
             for (slot, (voice, control)) in self.voices.iter_mut().zip(controls).enumerate() {
-                if control.active {
-                    let output = &mut out.voice_mut(slot)[offset..offset + count];
-                    for (dst, pending) in output.iter_mut().zip(&mut voice.output[self.cursor..end])
+                if !control.active {
+                    continue;
+                }
+                let output = &mut out.voice_mut(slot)[offset..offset + count];
+                let pending = &mut voice.output[self.cursor..end];
+                if let Some(attack) = attack.filter(|_| voice.initialised && control.pitch != 1.0) {
+                    for (((dst, pending), &weight), &dry) in
+                        output.iter_mut().zip(pending).zip(mix.iter()).zip(attack)
                     {
+                        let wet = mem::take(pending);
+                        *dst += wet * (1.0 - weight) + dry;
+                    }
+                } else {
+                    for (dst, pending) in output.iter_mut().zip(pending) {
                         *dst += mem::take(pending);
                     }
                 }
             }
+            if attack.is_some() {
+                mix.fill(0.0);
+            }
+            delay.copy_from_slice(&input[offset..offset + count]);
             self.cursor = end & (self.input.len() - 1);
             offset += count;
             // A frame ending here contributes only from the next sample on, so its input is N samples behind.
             if self.cursor.is_multiple_of(self.hop) {
+                self.transients.detect(&self.input[end - self.hop..end]);
                 self.render_frame(controls);
             }
+        }
+    }
+}
+
+struct Transients {
+    mix: Vec<f32>,
+    attack: Vec<f32>,
+    attack_gain: f32,
+    attack_step: f32,
+    cursor: usize,
+    latency: usize,
+    step: usize,
+    hold: usize,
+    fade_out: usize,
+    look_back: usize,
+    protect_before: usize,
+    recovery: usize,
+    decay: f32,
+    background: f32,
+    since_onset: usize,
+}
+
+impl Transients {
+    fn new(sample_rate: f32, latency: usize, hop: usize) -> Self {
+        let samples = |ms: f32| (sample_rate * ms / 1000.0).round() as usize;
+        let step = samples(1.0).next_power_of_two().min(hop);
+        let hold = samples(3.5);
+        let fade_out = samples(7.0).max(1);
+        let recovery = samples(20.0);
+        Self {
+            mix: vec![0.0; (latency + hold + fade_out).next_power_of_two()],
+            attack: vec![0.0; hop],
+            attack_gain: 1.0,
+            attack_step: 1.0 / samples(4.0).max(1) as f32,
+            cursor: 0,
+            latency,
+            step,
+            hold,
+            fade_out,
+            look_back: (latency * 3 / 4).min(samples(24.0)),
+            protect_before: (latency / 2).min(samples(14.0)),
+            recovery,
+            decay: (-(step as f32) / (0.012 * sample_rate)).exp(),
+            background: 0.0,
+            since_onset: recovery,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.mix.fill(0.0);
+        self.attack_gain = 1.0;
+        self.cursor = 0;
+        self.background = 0.0;
+        self.since_onset = self.recovery;
+    }
+
+    fn advance(&mut self, delayed: &[f32], target: f32) -> (&mut [f32], Option<&[f32]>) {
+        let start = self.cursor;
+        let end = start + delayed.len();
+        self.cursor = end & (self.mix.len() - 1);
+        let mix = &mut self.mix[start..end];
+        if !mix.iter().any(|&weight| weight > 0.0) {
+            self.attack_gain = target;
+            return (mix, None);
+        }
+        let attack = &mut self.attack[..delayed.len()];
+        for ((attack, &sample), &weight) in attack.iter_mut().zip(delayed).zip(mix.iter()) {
+            if weight == 0.0 {
+                self.attack_gain = target;
+            } else {
+                self.attack_gain +=
+                    (target - self.attack_gain).clamp(-self.attack_step, self.attack_step);
+            }
+            *attack = sample * weight * self.attack_gain;
+        }
+        (mix, Some(attack))
+    }
+
+    fn detect(&mut self, newest: &[f32]) {
+        for (i, chunk) in newest.chunks_exact(self.step).enumerate() {
+            let power = chunk.iter().map(|s| s * s).sum::<f32>() / self.step as f32;
+            if self.since_onset >= self.recovery && power > (8.0 * self.background).max(1e-6) {
+                let onset = self.latency - newest.len() + i * self.step;
+                self.protect(onset);
+                self.since_onset = 0;
+            }
+            self.since_onset = (self.since_onset + self.step).min(self.recovery);
+            self.background = self.background * self.decay + power * (1.0 - self.decay);
+        }
+    }
+
+    fn protect(&mut self, onset: usize) {
+        // Look back before the attack: a shifted FFT frame spreads it into earlier samples.
+        let start = onset.saturating_sub(self.look_back);
+        let full = onset.saturating_sub(self.protect_before);
+        let release = onset + self.hold;
+        let mask = self.mix.len() - 1;
+        for offset in start..release + self.fade_out {
+            let fade_in = (offset - start) as f32 / (full - start).max(1) as f32;
+            let fade_out = 1.0 - offset.saturating_sub(release) as f32 / self.fade_out as f32;
+            let weight = fade_in.min(fade_out);
+            let bin = &mut self.mix[(self.cursor + offset) & mask];
+            *bin = bin.max(weight);
         }
     }
 }
