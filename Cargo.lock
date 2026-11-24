@@ -3152,6 +3152,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vst3-smoke"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "core-foundation 0.10.1",
+ "libloading",
+ "vst3",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
