@@ -433,7 +433,9 @@ struct LowCut {
 impl LowCut {
     fn configure(&mut self, pitch: f32, sample_rate: f32) {
         let cutoff = (0.4 * pitch).min(100.0);
-        if self.cutoff != cutoff {
+        if cutoff <= 0.0 {
+            *self = Self::default();
+        } else if self.cutoff != cutoff {
             self.cutoff = cutoff;
             let g = (PI * cutoff / sample_rate).tan();
             self.a1 = 1.0 / (1.0 + g * (g + std::f32::consts::SQRT_2));
@@ -469,6 +471,18 @@ mod tests {
             "filter states: {:?}",
             marks.filter
         );
+    }
+
+    #[test]
+    fn zero_cutoff_does_not_freeze_the_previous_filter_state() {
+        let mut filter = LowCut::default();
+        filter.configure(110.0, 48_000.0);
+        for _ in 0..64 {
+            filter.process(1.0);
+        }
+        filter.configure(0.0, 48_000.0);
+        assert_eq!(filter.process(0.0), 0.0);
+        assert_eq!(filter.process(0.5), 0.5);
     }
 
     #[test]
