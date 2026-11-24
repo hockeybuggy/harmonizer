@@ -10,6 +10,7 @@ pub enum MidiEventKind {
     NoteOn { note: u8, velocity: f32 },
     NoteOff { note: u8 },
     PitchBend(f32),
+    Sustain(bool),
     ReleaseAll,
 }
 
@@ -151,6 +152,11 @@ pub fn parse_midi_bytes(bytes: &[u8], sample_rate: u32) -> Result<Vec<MidiEvent>
                         MidiMessage::PitchBend { bend } => Some(MidiEventKind::PitchBend(
                             normalise_pitch_bend(bend.0.as_int()),
                         )),
+                        MidiMessage::Controller { controller, value }
+                            if controller.as_int() == 64 =>
+                        {
+                            Some(MidiEventKind::Sustain(value.as_int() >= 64))
+                        }
                         MidiMessage::Controller { controller, .. }
                             if matches!(controller.as_int(), 120 | 123) =>
                         {
@@ -441,5 +447,68 @@ mod tests {
             }]],
         };
         assert!(parse_midi_bytes(&encode_smf(&seq), 48_000).is_err());
+    }
+
+    #[test]
+    fn parses_sustain_pedal_cc64_threshold() {
+        let track = vec![
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::Controller {
+                        controller: u7::new(64),
+                        value: u7::new(63),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(240),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::Controller {
+                        controller: u7::new(64),
+                        value: u7::new(64),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(240),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::Controller {
+                        controller: u7::new(64),
+                        value: u7::new(0),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+            },
+        ];
+        let smf = Smf {
+            header: Header::new(Format::SingleTrack, Timing::Metrical(u15::new(480))),
+            tracks: vec![track],
+        };
+
+        let events = parse_midi_bytes(&encode_smf(&smf), 48_000).unwrap();
+        assert_eq!(
+            events,
+            vec![
+                MidiEvent {
+                    sample: 0,
+                    kind: MidiEventKind::Sustain(false),
+                },
+                MidiEvent {
+                    sample: 12_000,
+                    kind: MidiEventKind::Sustain(true),
+                },
+                MidiEvent {
+                    sample: 24_000,
+                    kind: MidiEventKind::Sustain(false),
+                },
+            ]
+        );
     }
 }

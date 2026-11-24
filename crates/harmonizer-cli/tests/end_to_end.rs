@@ -306,3 +306,92 @@ fn midi_file_triggers_note_and_silences_after_release() {
     assert!(rms(&channels[0][2_000..10_000]) > 0.05);
     assert!(rms(&channels[0][24_000..40_000]) < 1e-6);
 }
+
+#[test]
+fn midi_sustain_pedal_holds_note_until_pedal_up() {
+    let dir = TempDir::new("midi-sustain");
+    let input_path = dir.path().join("in.wav");
+    let midi_path = dir.path().join("sustain.mid");
+    let output_path = dir.path().join("out.wav");
+    write_sine_wav(&input_path, 48_000, 72_000, 1);
+
+    let smf = Smf {
+        header: Header::new(Format::SingleTrack, Timing::Metrical(u15::new(480))),
+        tracks: vec![vec![
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::new(500_000))),
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::Controller {
+                        controller: u7::new(64),
+                        value: u7::new(127),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(60),
+                        vel: u7::new(127),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(120),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::NoteOff {
+                        key: u7::new(60),
+                        vel: u7::new(0),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(600),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::Controller {
+                        controller: u7::new(64),
+                        value: u7::new(0),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+            },
+        ]],
+    };
+    let mut bytes = Vec::new();
+    smf.write(&mut bytes).unwrap();
+    std::fs::write(&midi_path, bytes).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_harmonizer"))
+        .args([
+            "--input",
+            input_path.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--midi",
+            midi_path.to_str().unwrap(),
+            "--release-ms",
+            "20",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_, channels) = read_float_wav(&output_path);
+    assert!(rms(&channels[0][16_000..32_000]) > 0.05);
+    assert!(rms(&channels[0][44_000..64_000]) < 1e-6);
+}
