@@ -1,4 +1,4 @@
-use std::{ops::RangeInclusive, sync::Arc};
+use std::{f32::consts::TAU, ops::RangeInclusive, sync::Arc};
 
 use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
@@ -8,6 +8,10 @@ const OCTAVE_DOWN: RangeInclusive<f32> = 1.82..=2.18;
 
 pub(crate) struct PitchTracker {
     window: Vec<f32>,
+    filtered: Vec<f32>,
+    short_window: usize,
+    filter: [f32; 2],
+    filter_step: f32,
     write: usize,
     until_analysis: usize,
     hop: usize,
@@ -36,8 +40,12 @@ impl PitchTracker {
         let inverse = planner.plan_fft_inverse(fft_len);
         Self {
             window: vec![0.0; window],
+            filtered: vec![0.0; window],
+            short_window: ((sample_rate * 0.018).round() as usize).clamp(3, window),
+            filter: [0.0; 2],
+            filter_step: 1.0 - (-TAU * 1300.0 / sample_rate).exp(),
             write: 0,
-            until_analysis: window,
+            until_analysis: hop,
             hop,
             min_lag,
             max_lag,
@@ -65,8 +73,11 @@ impl PitchTracker {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.window.fill(0.0);
+        self.filtered.fill(0.0);
         self.write = 0;
-        self.until_analysis = self.window.len();
+        self.filter = [0.0; 2];
+        self.until_analysis = self.hop;
         self.period = None;
         self.pending_octave = 0;
         self.missed_hops = 0;
@@ -78,6 +89,15 @@ impl PitchTracker {
 
     pub(crate) fn push(&mut self, sample: f32) -> (Option<f32>, Option<f32>) {
         self.window[self.write] = sample;
+        let mut filtered = sample;
+        for stage in &mut self.filter {
+            *stage += self.filter_step * (filtered - *stage);
+            if stage.abs() < 1e-20 {
+                *stage = 0.0;
+            }
+            filtered = *stage;
+        }
+        self.filtered[self.write] = filtered;
         self.write += 1;
         if self.write == self.window.len() {
             self.write = 0;
@@ -87,7 +107,21 @@ impl PitchTracker {
             return (self.period, None);
         }
         self.until_analysis = self.hop;
-        let (candidate, best) = self.analyse();
+        let len = self.window.len();
+        let (primary, best) = self.analyse(None);
+        let candidate = primary.or_else(|| {
+            let recent_energy = self.energy[len] - self.energy[len - self.short_window];
+            if recent_energy < 1e-9 * self.short_window as f32 {
+                return None;
+            }
+            // Broadband aspiration can obscure a pitched vowel without erasing its low harmonics.
+            self.analyse(Some(0.10 * recent_energy))
+                .0
+                .filter(|&(period, _)| {
+                    self.period.is_some() || self.recent_periodicity(period) >= 0.85
+                })
+                .map(|(period, score)| (period, score.min(0.78)))
+        });
         let mut clarity = 0.0;
         if let Some((period, score)) = candidate {
             self.missed_hops = 0;
@@ -106,19 +140,51 @@ impl PitchTracker {
         (self.period, Some(clarity))
     }
 
-    fn analyse(&mut self) -> (Option<(f32, f32)>, f32) {
-        let len = self.window.len();
-        let mean = self.window.iter().sum::<f32>() / len as f32;
-        let frame = self.window[self.write..]
-            .iter()
-            .chain(&self.window[..self.write]);
+    fn recent_periodicity(&self, period: f32) -> f32 {
+        let lag = period.round() as usize;
+        let len = self.filtered.len();
+        let span = lag.min(len - lag);
+        let start = self.write + len - span;
+        let mut cross = 0.0;
+        let mut energy = 0.0;
+        for n in start..start + span {
+            let a = self.filtered[n % len];
+            let b = self.filtered[(n - lag) % len];
+            cross += a * b;
+            energy += a * a + b * b;
+        }
+        2.0 * cross / energy.max(1e-9 * span as f32)
+    }
+
+    pub(crate) fn onset_lookback(&self, period: f32, limit: usize) -> usize {
+        if self.recent_periodicity(period) >= 0.88 {
+            (period.round() as usize).min(limit)
+        } else {
+            0
+        }
+    }
+
+    fn analyse(&mut self, band_energy_floor: Option<f32>) -> (Option<(f32, f32)>, f32) {
+        let short = band_energy_floor.is_some();
+        let (window, len) = if short {
+            (&self.filtered, self.short_window)
+        } else {
+            (&self.window, self.window.len())
+        };
+        let start = (self.write + window.len() - len) % window.len();
+        let frame = window[start..].iter().chain(&window[..start]).take(len);
+        let mean = if short {
+            frame.clone().sum::<f32>() / len as f32
+        } else {
+            window.iter().sum::<f32>() / len as f32
+        };
         for (i, (&sample, dst)) in frame.zip(&mut self.time).enumerate() {
             let centred = sample - mean;
             *dst = centred;
             self.energy[i + 1] = self.energy[i] + centred * centred;
         }
         let energy = self.energy[len];
-        if energy < 1e-9 * len as f32 {
+        if energy < (1e-9 * len as f32).max(band_energy_floor.unwrap_or(0.0)) {
             return (None, 0.0);
         }
         self.time[len..].fill(0.0);
@@ -133,7 +199,12 @@ impl PitchTracker {
             .unwrap();
 
         let scale = 2.0 / self.time.len() as f32;
-        let nsdf = &mut self.time[..=self.max_lag + 1];
+        let max_lag = if short {
+            self.max_lag.min(7 * len / 10).min(len - 2)
+        } else {
+            self.max_lag
+        };
+        let nsdf = &mut self.time[..=max_lag + 1];
         for (lag, value) in nsdf.iter_mut().enumerate() {
             let overlap_energy = self.energy[len - lag] + (energy - self.energy[lag]);
             *value *= scale / overlap_energy.max(1e-12);
@@ -141,17 +212,24 @@ impl PitchTracker {
         let Some(first_crossing) = nsdf.iter().position(|&value| value <= 0.0) else {
             return (None, 0.0);
         };
-        let peaks = (self.min_lag.max(first_crossing + 1)..=self.max_lag)
+        let peaks = (self.min_lag.max(first_crossing + 1)..=max_lag)
             .filter(|&lag| nsdf[lag] > nsdf[lag - 1] && nsdf[lag] >= nsdf[lag + 1]);
         let best = peaks.clone().map(|lag| nsdf[lag]).fold(0.0, f32::max);
-        let strong: f32 = if self.period.is_some() { 0.72 } else { 0.80 };
+        let strong: f32 = if short {
+            0.82
+        } else if self.period.is_some() {
+            0.72
+        } else {
+            0.80
+        };
         let first = peaks
             .clone()
             .find(|&lag| nsdf[lag] >= strong.max(0.9 * best));
         let nearby = self.period.and_then(|previous| {
             peaks
                 .filter(|&lag| {
-                    (0.80..=1.25).contains(&(lag as f32 / previous)) && nsdf[lag] >= 0.56
+                    (0.80..=1.25).contains(&(lag as f32 / previous))
+                        && nsdf[lag] >= if short { 0.77 } else { 0.56 }
                 })
                 .max_by(|&a, &b| nsdf[a].total_cmp(&nsdf[b]))
         });

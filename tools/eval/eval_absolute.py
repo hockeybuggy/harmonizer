@@ -16,6 +16,7 @@ RATE = 48_000
 TRACK_RATE = 12_000
 FRAME = 512
 HOP = 120
+HOP_MS = 1000 * HOP / TRACK_RATE
 QUALITIES = ("low", "balanced", "high")
 NOTES = "C3,E3,G3"
 
@@ -90,6 +91,52 @@ def vibrato_depth(reference):
     return np.minimum(depth, 100)
 
 
+def onset_metrics(voiced, accurate, leaked):
+    boundaries = np.flatnonzero(np.diff(voiced, prepend=False, append=False))
+    leakage_ms, target_ms = [], []
+    missed = 0
+    for start, end in boundaries.reshape(-1, 2):
+        if (end - start) * HOP_MS < 250:
+            continue
+        stop = min(end, start + round(300 / HOP_MS))
+        leakage_ms.append(HOP_MS * np.count_nonzero(leaked[start:stop]))
+        good = accurate[start:end]
+        hits = np.flatnonzero(good[:-1] & good[1:])
+        if hits.size:
+            target_ms.append(HOP_MS * int(hits[0]))
+        else:
+            missed += 1
+    return {
+        "onset_notes": len(leakage_ms),
+        "onset_leak_ms_median": percentile(leakage_ms, 50),
+        "onset_leak_ms_p90": percentile(leakage_ms, 90),
+        "onset_leak_ms_max": max(leakage_ms, default=None),
+        "onset_target_ms_median": percentile(target_ms, 50),
+        "onset_target_ms_p90": percentile(target_ms, 90),
+        "onset_target_misses": missed,
+    }
+
+
+def percentile(values, q):
+    return round(float(np.percentile(values, q)), 1) if values else None
+
+
+def frame_power(audio):
+    hop = RATE * HOP // TRACK_RATE
+    padded = np.pad(audio, (hop // 2, hop - hop // 2))
+    frames = np.lib.stride_tricks.sliding_window_view(padded, hop)[::hop]
+    return np.mean(frames**2, axis=1)
+
+
+def consonant_ratio(voiced, source_power, output_power):
+    energetic = (~voiced) & (source_power > 1e-4 * source_power.max())
+    if not energetic.any():
+        return None
+    return round(
+        float(np.sqrt(output_power[energetic].sum() / source_power[energetic].sum())), 4
+    )
+
+
 def metrics(reference, output, tolerance, in_features, out_features, target):
     voiced = np.isfinite(reference)
     error = np.abs(1200 * np.log2(output / target))
@@ -110,6 +157,7 @@ def metrics(reference, output, tolerance, in_features, out_features, target):
             10 * np.log10(max(low_out, 1e-20) / max(low_in, 1e-20)), 2
         ),
         "flux_spikes_pct": round(100 * spike.mean(), 2),
+        **onset_metrics(voiced, accurate, leaked & ~accurate),
     }
 
 
@@ -120,6 +168,8 @@ def evaluate(args):
     rows = []
     for source in sorted(args.corpus.glob("*.wav")):
         if args.only and not source.stem.startswith(tuple(args.only)):
+            continue
+        if args.exclude and source.stem.startswith(tuple(args.exclude)):
             continue
         audio = read(source)
         cache = (
@@ -133,6 +183,7 @@ def evaluate(args):
         depth = vibrato_depth(reference)
         tolerance = 15 + args.expression / 100 * depth
         in_features = features(audio)
+        source_power = frame_power(audio)
         print(source.stem, flush=True)
         for quality in args.quality or QUALITIES:
             destination = args.output / f"{source.stem}-{quality}-a2.wav"
@@ -157,6 +208,9 @@ def evaluate(args):
                         in_features,
                         features(output),
                         220,
+                    ),
+                    "consonant_rms_ratio": consonant_ratio(
+                        np.isfinite(reference), source_power, frame_power(output)
                     ),
                 }
             )
@@ -189,6 +243,7 @@ def main():
     parser.add_argument(
         "--only", action="append", help="limit inputs to this filename prefix"
     )
+    parser.add_argument("--exclude", action="append", help="skip this filename prefix")
     parser.add_argument("--quality", choices=QUALITIES, action="append")
     parser.add_argument(
         "--chords", action="append", help="also render a chord for this filename prefix"

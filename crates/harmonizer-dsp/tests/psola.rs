@@ -137,6 +137,46 @@ fn tracker_keeps_a_voiced_note_under_breath_noise() {
 }
 
 #[test]
+fn clean_note_onset_does_not_wait_for_the_full_analysis_window() {
+    let input = sine(185.0, SETTLE);
+    let notes = voices(&[220.0], 1.0);
+    for quality in [Quality::LowLatency, Quality::Balanced] {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        let latency = engine.latency();
+        let output = render(&mut engine, &input, &notes, 64);
+        assert_pitch(&output[0][latency + 960..latency + 2_400], 220.0, 20.0);
+    }
+}
+
+#[test]
+fn breathy_vowel_acquires_pitch_at_its_onset() {
+    let hz = 185.0;
+    let target = 220.0;
+    let clean = vowel(hz, &VOWEL_AH, SETTLE);
+    let mut breath = noise(2 * SETTLE);
+    for i in (1..breath.len()).rev() {
+        breath[i] -= breath[i - 1];
+    }
+    let level = rms(&clean) / rms(&breath[SETTLE..]);
+    let mut input: Vec<_> = breath[..SETTLE].iter().map(|n| n * level).collect();
+    input.extend(
+        clean
+            .iter()
+            .zip(&breath[SETTLE..])
+            .map(|(v, n)| v + n * level),
+    );
+    input.resize(3 * SETTLE, 0.0);
+    for quality in [Quality::LowLatency, Quality::Balanced] {
+        let mut engine = PsolaEngine::new(SAMPLE_RATE, quality);
+        let latency = engine.latency();
+        let output = render(&mut engine, &input, &voices(&[target], 1.0), 64);
+        let aligned = &output[0][latency..];
+        assert_eq!(&aligned[480..SETTLE - 480], &input[480..SETTLE - 480]);
+        assert_pitch(&aligned[SETTLE + 720..SETTLE + 2_400], target, 20.0);
+    }
+}
+
+#[test]
 fn tracker_prefers_the_established_voice_over_a_drone() {
     let hz = 198.0;
     let lead = sine(hz, 2 * SETTLE);
