@@ -167,6 +167,7 @@ pub fn render_audio(
                 MidiEventKind::NoteOn { note, velocity } => harmonizer.note_on(note, velocity),
                 MidiEventKind::NoteOff { note } => harmonizer.note_off(note),
                 MidiEventKind::PitchBend(bend) => harmonizer.set_pitch_bend(bend),
+                MidiEventKind::Sustain(down) => harmonizer.set_sustain(down),
                 MidiEventKind::ReleaseAll => harmonizer.release_all(),
             },
         },

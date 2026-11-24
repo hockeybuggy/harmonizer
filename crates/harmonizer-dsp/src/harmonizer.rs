@@ -105,6 +105,10 @@ impl Harmonizer {
         self.voices.note_off(note);
     }
 
+    pub fn set_sustain(&mut self, down: bool) {
+        self.voices.set_sustain(down);
+    }
+
     pub fn release_all(&mut self) {
         self.voices.release_all();
     }

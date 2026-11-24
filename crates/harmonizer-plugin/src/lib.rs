@@ -268,6 +268,9 @@ fn handle_event(harmonizer: &mut Harmonizer, event: NoteEvent<()>) {
             None => harmonizer.release_all(),
         },
         NoteEvent::MidiPitchBend { value, .. } => harmonizer.set_pitch_bend(value * 2.0 - 1.0),
+        NoteEvent::MidiCC { cc, value, .. } if cc == control_change::DAMPER_PEDAL => {
+            harmonizer.set_sustain(value >= 0.5)
+        }
         NoteEvent::MidiCC { cc, .. }
             if cc == control_change::ALL_NOTES_OFF || cc == control_change::ALL_SOUND_OFF =>
         {
