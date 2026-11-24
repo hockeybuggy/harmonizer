@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ModeParam {
-    #[name = "Absolute (retune)"]
+    #[name = "Absolute"]
     Absolute,
-    #[name = "Relative (transpose)"]
+    #[name = "Relative"]
     Relative,
 }
 
@@ -19,6 +19,8 @@ pub enum QualityParam {
     HighQuality,
 }
 
+/// Live fills its device panel from this order, four parameters per column: mode and mix,
+/// then the voice, then how notes play.
 #[derive(Params)]
 pub struct HarmonizerParams {
     #[id = "mode"]
@@ -31,20 +33,20 @@ pub struct HarmonizerParams {
     pub dry: FloatParam,
     #[id = "formant"]
     pub formant: FloatParam,
+    #[id = "expression"]
+    pub expression: FloatParam,
     #[id = "refnote"]
     pub reference_note: IntParam,
-    #[id = "bendrange"]
-    pub pitch_bend_range: IntParam,
+    #[id = "spread"]
+    pub stereo_spread: FloatParam,
     #[id = "attack"]
     pub attack: FloatParam,
     #[id = "release"]
     pub release: FloatParam,
     #[id = "velsens"]
     pub velocity_sensitivity: FloatParam,
-    #[id = "spread"]
-    pub stereo_spread: FloatParam,
-    #[id = "expression"]
-    pub expression: FloatParam,
+    #[id = "bendrange"]
+    pub pitch_bend_range: IntParam,
 }
 
 fn gain_param(name: &str, default_db: f32) -> FloatParam {

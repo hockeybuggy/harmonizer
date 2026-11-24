@@ -57,6 +57,14 @@ arrive. The editor says which one is missing.
    **Monitor** on **In**. Mute it, or turn **Dry** up on the harmonizer,
    depending on whether you want to hear the original too.
 
+### Live's device panel
+
+Unfold the device (the triangle in its title bar) to get the parameters as
+Live controls, so you can adjust, automate and MIDI-map them without opening
+the plugin window. They're laid out in three columns: mode and mix, voice,
+then how notes play. Open the plugin window (the wrench icon) for the input
+readout and the keyboard.
+
 ### If it's silent
 
 The line under the title explains what's missing:
