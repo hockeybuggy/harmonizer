@@ -1,4 +1,7 @@
+mod support;
+
 use harmonizer_dsp::{Harmonizer, Mode, Params, Quality};
+use support::{VOWEL_AH, vowel};
 
 const SAMPLE_RATE: f32 = 48_000.0;
 
@@ -63,6 +66,29 @@ fn dry_signal_is_delayed_by_reported_latency() {
 }
 
 #[test]
+fn reset_clears_pitch_bend_from_the_previous_transport_position() {
+    let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 512);
+    harmonizer.set_params(Params {
+        mode: Mode::Relative,
+        ..Params::default()
+    });
+    let input = sine(220.0, 12_288);
+    harmonizer.note_on(60, 1.0);
+    let expected = run(&mut harmonizer, &input);
+
+    harmonizer.set_pitch_bend(1.0);
+    harmonizer.reset();
+    harmonizer.note_on(60, 1.0);
+    let actual = run(&mut harmonizer, &input);
+    let max_error = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f32::max);
+    assert!(max_error < 1e-5, "peak error {max_error}");
+}
+
+#[test]
 fn held_note_produces_output_and_release_silences_it() {
     for mode in [Mode::Absolute, Mode::Relative] {
         let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
@@ -85,5 +111,250 @@ fn held_note_produces_output_and_release_silences_it() {
             "{mode:?} kept sounding after release"
         );
         assert!(harmonizer.voices().active().next().is_none());
+    }
+}
+
+#[test]
+fn sustain_pedal_holds_voice_through_note_off_until_pedal_up() {
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+        harmonizer.set_params(Params {
+            mode,
+            release_ms: 20.0,
+            ..Params::default()
+        });
+        let input = sine(220.0, 24_000);
+
+        harmonizer.set_sustain(true);
+        harmonizer.note_on(57, 1.0);
+        let _ = run(&mut harmonizer, &input);
+
+        harmonizer.note_off(57);
+        let sustained = run(&mut harmonizer, &input);
+        assert!(
+            rms(&sustained[12_000..]) > 0.05,
+            "{mode:?} voice released while sustain pedal was down"
+        );
+        let active: Vec<_> = harmonizer.voices().active().collect();
+        assert_eq!(active.len(), 1);
+        assert!(!active[0].1.held && active[0].1.sustained);
+
+        harmonizer.set_sustain(false);
+        let released = run(&mut harmonizer, &input);
+        assert!(
+            rms(&released[12_000..]) < 1e-6,
+            "{mode:?} kept sounding after sustain pedal lifted"
+        );
+        assert!(harmonizer.voices().active().next().is_none());
+    }
+}
+
+#[test]
+fn pedal_up_keeps_held_key_sounding_while_releasing_sustained_key() {
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+        harmonizer.set_params(Params {
+            mode,
+            release_ms: 20.0,
+            ..Params::default()
+        });
+        let input = sine(220.0, 24_000);
+
+        harmonizer.set_sustain(true);
+        harmonizer.note_on(57, 1.0);
+        harmonizer.note_on(64, 1.0);
+        let _ = run(&mut harmonizer, &input);
+
+        harmonizer.note_off(57);
+        harmonizer.set_sustain(false);
+        let after = run(&mut harmonizer, &input);
+        assert!(
+            rms(&after[12_000..]) > 0.05,
+            "{mode:?} silenced still-held key when sustain pedal lifted"
+        );
+        let active: Vec<_> = harmonizer.voices().active().collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].1.note, 64);
+        assert!(active[0].1.held && !active[0].1.sustained);
+    }
+}
+
+#[test]
+fn pedal_release_does_not_change_other_voices_with_block_size() {
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut input = vec![0.0; 16_384];
+        let mut seed = 43u32;
+        for (i, sample) in input[4_400..6_000].iter_mut().enumerate() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *sample = ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5) * (-(i as f32) / 400.0).exp();
+        }
+        let render = |block_size| {
+            let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 4_096);
+            harmonizer.set_params(Params {
+                mode,
+                attack_ms: 1.0,
+                release_ms: 5.0,
+                ..Params::default()
+            });
+            harmonizer.set_sustain(true);
+            harmonizer.note_on(60, 1.0);
+            harmonizer.note_on(64, 1.0);
+            let mut output = input.clone();
+            harmonizer.process(&mut [&mut output[..4_096]]);
+            harmonizer.note_off(60);
+            harmonizer.set_sustain(false);
+            for block in output[4_096..].chunks_mut(block_size) {
+                harmonizer.process(&mut [block]);
+            }
+            output
+        };
+        let expected = render(1);
+        for size in [7, 512, 131_072] {
+            let max_error = render(size)
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
+            assert!(max_error < 1e-5, "{mode:?}, block {size}: {max_error}");
+        }
+    }
+}
+
+#[test]
+fn retrigger_under_sustain_keeps_slot_and_output_continuity() {
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+        harmonizer.set_params(Params {
+            mode,
+            attack_ms: 10.0,
+            release_ms: 20.0,
+            ..Params::default()
+        });
+        let input = sine(220.0, 12_000);
+
+        harmonizer.set_sustain(true);
+        harmonizer.note_on(57, 1.0);
+        let _ = run(&mut harmonizer, &input);
+        let original_slot = harmonizer.voices().active().next().unwrap().0;
+
+        harmonizer.note_off(57);
+        let _ = run(&mut harmonizer, &input);
+        harmonizer.note_on(57, 1.0);
+
+        let active: Vec<_> = harmonizer.voices().active().collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, original_slot);
+        assert!(
+            (active[0].1.envelope - 1.0).abs() < 1e-6,
+            "{mode:?} envelope dropped on retrigger under sustain"
+        );
+
+        let retriggered = run(&mut harmonizer, &sine(220.0, 2_048));
+        assert!(
+            rms(&retriggered[..512]) > 0.05,
+            "{mode:?} dropped out immediately after retrigger under sustain"
+        );
+    }
+}
+
+#[test]
+fn release_all_clears_sustain_pedal() {
+    let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+    harmonizer.set_params(Params {
+        release_ms: 20.0,
+        ..Params::default()
+    });
+    let input = sine(220.0, 24_000);
+
+    harmonizer.set_sustain(true);
+    harmonizer.note_on(57, 1.0);
+    let _ = run(&mut harmonizer, &input);
+    harmonizer.note_off(57);
+    harmonizer.release_all();
+    let released = run(&mut harmonizer, &input);
+    assert!(rms(&released[12_000..]) < 1e-6);
+    assert!(harmonizer.voices().active().next().is_none());
+
+    harmonizer.note_on(60, 1.0);
+    let _ = run(&mut harmonizer, &input);
+    harmonizer.note_off(60);
+    let after = run(&mut harmonizer, &input);
+    assert!(rms(&after[12_000..]) < 1e-6);
+    assert!(harmonizer.voices().active().next().is_none());
+}
+
+fn noise(len: usize) -> Vec<f32> {
+    let mut seed = 7u32;
+    (0..len)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5) * 0.5
+        })
+        .collect()
+}
+
+fn db(ratio: f32) -> f32 {
+    20.0 * ratio.log10()
+}
+
+fn steady_level(mode: Mode, input: &[f32], notes: &[u8]) -> f32 {
+    let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+    harmonizer.set_params(Params {
+        mode,
+        ..Params::default()
+    });
+    for &note in notes {
+        harmonizer.note_on(note, 1.0);
+    }
+    let out = run(&mut harmonizer, input);
+    rms(&out[harmonizer.latency() + 9_600..])
+}
+
+#[test]
+fn chords_are_as_loud_as_a_single_voice() {
+    let vowel = vowel(196.0, &VOWEL_AH, 48_000);
+    let noise = noise(48_000);
+    for mode in [Mode::Absolute, Mode::Relative] {
+        for (name, input) in [("vowel", &vowel), ("noise", &noise)] {
+            let notes = [62, 65, 69];
+            // Each note alone can differ in level, so compare with their average power.
+            let single = (notes
+                .iter()
+                .map(|&note| steady_level(mode, input, &[note]).powi(2))
+                .sum::<f32>()
+                / notes.len() as f32)
+                .sqrt();
+            let triad = steady_level(mode, input, &notes);
+            let change = db(triad / single);
+            assert!(
+                change.abs() < 1.0,
+                "{mode:?} {name}: triad is {change:+.1} dB against one voice"
+            );
+        }
+    }
+}
+
+#[test]
+fn adding_notes_does_not_swell() {
+    let input = vowel(196.0, &VOWEL_AH, 48_000);
+    let onset = 24_000;
+    for mode in [Mode::Absolute, Mode::Relative] {
+        let mut harmonizer = Harmonizer::new(SAMPLE_RATE, 256);
+        harmonizer.set_params(Params {
+            mode,
+            ..Params::default()
+        });
+        harmonizer.note_on(62, 1.0);
+        let mut out = run(&mut harmonizer, &input[..onset]);
+        harmonizer.note_on(65, 1.0);
+        harmonizer.note_on(69, 1.0);
+        out.extend(run(&mut harmonizer, &input[onset..]));
+        let before = rms(&out[onset - 4_800..onset]);
+        let loudest = out[onset..onset + 9_600]
+            .chunks(480)
+            .map(rms)
+            .fold(0.0, f32::max);
+        let swell = db(loudest / before);
+        assert!(swell < 2.5, "{mode:?}: swelled {swell:+.1} dB");
     }
 }

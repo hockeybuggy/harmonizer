@@ -1,10 +1,11 @@
 use nice_plug::prelude::*;
+use std::sync::Arc;
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ModeParam {
-    #[name = "Absolute (retune)"]
+    #[name = "Absolute"]
     Absolute,
-    #[name = "Relative (transpose)"]
+    #[name = "Relative"]
     Relative,
 }
 
@@ -18,6 +19,8 @@ pub enum QualityParam {
     HighQuality,
 }
 
+/// Live fills its device panel from this order, four parameters per column: mode and mix,
+/// then the voice, then how notes play.
 #[derive(Params)]
 pub struct HarmonizerParams {
     #[id = "mode"]
@@ -30,18 +33,20 @@ pub struct HarmonizerParams {
     pub dry: FloatParam,
     #[id = "formant"]
     pub formant: FloatParam,
+    #[id = "expression"]
+    pub expression: FloatParam,
     #[id = "refnote"]
     pub reference_note: IntParam,
-    #[id = "bendrange"]
-    pub pitch_bend_range: IntParam,
+    #[id = "spread"]
+    pub stereo_spread: FloatParam,
     #[id = "attack"]
     pub attack: FloatParam,
     #[id = "release"]
     pub release: FloatParam,
     #[id = "velsens"]
     pub velocity_sensitivity: FloatParam,
-    #[id = "spread"]
-    pub stereo_spread: FloatParam,
+    #[id = "bendrange"]
+    pub pitch_bend_range: IntParam,
 }
 
 fn gain_param(name: &str, default_db: f32) -> FloatParam {
@@ -102,14 +107,74 @@ impl Default for HarmonizerParams {
                 60,
                 IntRange::Linear { min: 0, max: 127 },
             )
-            .with_value_to_string(formatters::v2s_i32_key_formatter())
-            .with_string_to_value(formatters::s2v_i32_key_formatter()),
+            .with_value_to_string(Arc::new(note_name))
+            .with_string_to_value(Arc::new(parse_note_name)),
             pitch_bend_range: IntParam::new("Bend Range", 2, IntRange::Linear { min: 0, max: 24 })
                 .with_unit(" st"),
             attack: time_param("Attack", 10.0, 2000.0),
             release: time_param("Release", 120.0, 5000.0),
             velocity_sensitivity: percent_param("Velocity", 0.5),
             stereo_spread: percent_param("Spread", 0.5),
+            expression: percent_param("Expression", 1.0),
         }
+    }
+}
+
+const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+/// Live's convention: MIDI note 60 is C3.
+pub fn note_name(note: i32) -> String {
+    format!(
+        "{}{}",
+        NOTE_NAMES[note.rem_euclid(12) as usize],
+        note.div_euclid(12) - 2
+    )
+}
+
+fn parse_note_name(text: &str) -> Option<i32> {
+    let text = text.trim();
+    if let Ok(number) = text.parse::<i32>() {
+        return Some(number);
+    }
+    let mut chars = text.chars();
+    let mut pitch = match chars.next()?.to_ascii_uppercase() {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    let rest = chars.as_str();
+    let octave = if let Some(rest) = rest.strip_prefix('#') {
+        pitch += 1;
+        rest
+    } else if let Some(rest) = rest.strip_prefix('b') {
+        pitch -= 1;
+        rest
+    } else {
+        rest
+    };
+    let note = (octave.parse::<i32>().ok()? + 2) * 12 + pitch;
+    (0..=127).contains(&note).then_some(note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_names_use_live_octaves_and_round_trip() {
+        assert_eq!(note_name(60), "C3");
+        assert_eq!(note_name(0), "C-2");
+        for note in 0..=127 {
+            assert_eq!(parse_note_name(&note_name(note)), Some(note));
+        }
+        assert_eq!(parse_note_name("Bb2"), Some(58));
+        assert_eq!(parse_note_name("64"), Some(64));
     }
 }

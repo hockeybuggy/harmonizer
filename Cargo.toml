@@ -4,9 +4,11 @@ members = [
     "crates/harmonizer-dsp",
     "crates/harmonizer-plugin",
     "crates/harmonizer-cli",
+    "crates/vst3-smoke",
     "xtask",
 ]
 default-members = ["crates/harmonizer-dsp", "crates/harmonizer-cli"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,7 +22,13 @@ realfft = "3.5"
 hound = "3.5"
 midly = "0.5"
 clap = { version = "4.6", features = ["derive"] }
+anyhow = "1.0"
 assert_no_alloc = "1.1"
+
+# nice-plug 0.4.2 inverts the auxiliary bus index in VST3 `setBusArrangements`, so hosts cannot
+# configure a plugin without a main input (the instrument variant). Drop this once upstream fixes it.
+[patch.crates-io]
+nice-plug = { path = "vendor/nice-plug" }
 
 [profile.dev]
 opt-level = 1

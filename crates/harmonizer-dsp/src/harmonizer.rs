@@ -6,6 +6,9 @@ use crate::vocoder::VocoderEngine;
 use crate::voices::VoiceAllocator;
 
 const GAIN_SMOOTHING_MS: f32 = 10.0;
+// Duck quickly as voices join so a chord never swells, and recover gently as they leave.
+const LOUDNESS_FALL_MS: f32 = 2.0;
+const LOUDNESS_RISE_MS: f32 = 30.0;
 
 /// The complete harmonizer: MIDI notes in, re-pitched voices plus dry signal out.
 ///
@@ -21,10 +24,14 @@ pub struct Harmonizer {
     controls: [VoiceControl; MAX_VOICES],
     buffers: VoiceBuffers,
     mono: Vec<f32>,
+    wet_levels: Vec<f32>,
     dry_delay: [DelayLine; 2],
     pitch_bend: f32,
     wet_gain: Smoothed,
     dry_gain: Smoothed,
+    loudness: f32,
+    loudness_fall: f32,
+    loudness_rise: f32,
 }
 
 impl Harmonizer {
@@ -56,10 +63,14 @@ impl Harmonizer {
             controls: [VoiceControl::default(); MAX_VOICES],
             buffers: VoiceBuffers::new(max_block),
             mono: vec![0.0; max_block],
+            wet_levels: vec![0.0; max_block],
             dry_delay: [DelayLine::new(max_latency), DelayLine::new(max_latency)],
             pitch_bend: 0.0,
             wet_gain: Smoothed::new(params.wet_gain, smoothing),
             dry_gain: Smoothed::new(params.dry_gain, smoothing),
+            loudness: 1.0,
+            loudness_fall: smoothing_coefficient(sample_rate, LOUDNESS_FALL_MS),
+            loudness_rise: smoothing_coefficient(sample_rate, LOUDNESS_RISE_MS),
         }
     }
 
@@ -105,6 +116,10 @@ impl Harmonizer {
         self.voices.note_off(note);
     }
 
+    pub fn set_sustain(&mut self, down: bool) {
+        self.voices.set_sustain(down);
+    }
+
     pub fn release_all(&mut self) {
         self.voices.release_all();
     }
@@ -125,8 +140,10 @@ impl Harmonizer {
             delay.reset();
         }
         self.voices.kill_all();
+        self.pitch_bend = 0.0;
         self.wet_gain.snap();
         self.dry_gain.snap();
+        self.loudness = 1.0;
     }
 
     pub fn process(&mut self, channels: &mut [&mut [f32]]) {
@@ -134,15 +151,44 @@ impl Harmonizer {
             return;
         };
         let max_block = self.buffers.max_block();
+        let release_step = envelope_step(self.sample_rate, self.params.release_ms);
         let mut start = 0;
         while start < len {
-            let end = (start + max_block).min(len);
-            self.process_block(channels, start, end);
+            let limit = (len - start).min(max_block);
+            let end = start + self.samples_until_retirement(limit, release_step);
+            self.process_block(channels, start, end, release_step);
             start = end;
         }
     }
 
-    fn process_block(&mut self, channels: &mut [&mut [f32]], start: usize, end: usize) {
+    fn samples_until_retirement(&self, limit: usize, release_step: f32) -> usize {
+        let Some(mut level) = self
+            .voices
+            .active()
+            .filter(|(_, voice)| !voice.held && !voice.sustained)
+            .map(|(_, voice)| voice.envelope)
+            .min_by(f32::total_cmp)
+        else {
+            return limit;
+        };
+        // Both engines share unshifted audio across voices, so retire at the same sample
+        // regardless of callback size. Repeated subtraction matches the envelope's rounding.
+        for samples in 1..limit {
+            level -= release_step;
+            if level <= 0.0 {
+                return samples;
+            }
+        }
+        limit
+    }
+
+    fn process_block(
+        &mut self,
+        channels: &mut [&mut [f32]],
+        start: usize,
+        end: usize,
+        release_step: f32,
+    ) {
         let len = end - start;
         let channel_count = channels.len().min(2);
         let scale = 1.0 / channel_count as f32;
@@ -158,14 +204,17 @@ impl Harmonizer {
         self.buffers.begin_block(len);
         let controls = self.controls;
         let engine: &mut dyn Engine = match self.params.mode {
-            Mode::Absolute => &mut self.psola[self.params.quality.index()],
+            Mode::Absolute => {
+                let psola = &mut self.psola[self.params.quality.index()];
+                psola.set_expression(self.params.expression);
+                psola
+            }
             Mode::Relative => &mut self.vocoder[self.params.quality.index()],
         };
         engine.process(&self.mono[..len], &controls, &mut self.buffers);
         let latency = engine.latency();
 
         let attack_step = envelope_step(self.sample_rate, self.params.attack_ms);
-        let release_step = envelope_step(self.sample_rate, self.params.release_ms);
         let spread = self.params.stereo_spread;
         let sensitivity = self.params.velocity_sensitivity;
 
@@ -181,11 +230,35 @@ impl Harmonizer {
             }
         }
 
-        for slot in 0..MAX_VOICES {
-            let voice = self.voices.voices()[slot];
-            if !voice.active {
-                continue;
+        let mut active = [0; MAX_VOICES];
+        let mut count = 0;
+        for (slot, _) in self.voices.active() {
+            active[count] = slot;
+            count += 1;
+        }
+        let active = &active[..count];
+
+        // Voices at different pitches add in power, so scale each by 1/sqrt(n) to keep a chord
+        // as loud as one voice. Counting by envelope lets attacks and releases cross-fade.
+        for i in 0..len {
+            let mut power = 0.0;
+            for &slot in active {
+                let envelope = self.voices.step_envelope(slot, attack_step, release_step);
+                self.buffers.voice_mut(slot)[i] *= envelope;
+                power += envelope * envelope;
             }
+            let target = power.max(1.0).sqrt().recip();
+            let coefficient = if target < self.loudness {
+                self.loudness_fall
+            } else {
+                self.loudness_rise
+            };
+            self.loudness += (target - self.loudness) * coefficient;
+            self.wet_levels[i] = self.wet_gain.next() * self.loudness;
+        }
+
+        for &slot in active {
+            let voice = self.voices.voices()[slot];
             let velocity_gain = 1.0 - sensitivity + sensitivity * voice.velocity;
             let pan = spread * ((voice.note as f32 - 60.0) / 24.0).clamp(-1.0, 1.0);
             let pans = if channel_count == 2 {
@@ -193,19 +266,17 @@ impl Harmonizer {
             } else {
                 [1.0, 1.0]
             };
-            let mut wet = self.wet_gain;
             let rendered = self.buffers.voice(slot);
-            for i in 0..len {
-                let level = self.voices.step_envelope(slot, attack_step, release_step)
-                    * velocity_gain
-                    * wet.next();
-                for (ch, channel) in channels[..channel_count].iter_mut().enumerate() {
-                    channel[start + i] += rendered[i] * level * pans[ch];
+            for (ch, channel) in channels[..channel_count].iter_mut().enumerate() {
+                let gain = velocity_gain * pans[ch];
+                for ((sample, &voice), &wet) in channel[start..end]
+                    .iter_mut()
+                    .zip(rendered)
+                    .zip(&self.wet_levels[..len])
+                {
+                    *sample += voice * wet * gain;
                 }
             }
-        }
-        for _ in 0..len {
-            self.wet_gain.next();
         }
         self.voices.retire_finished();
     }

@@ -156,7 +156,9 @@ pub fn render(
     block_size: usize,
 ) -> Vec<Vec<f32>> {
     let mut buffers = VoiceBuffers::new(block_size);
-    let mut outputs = vec![Vec::with_capacity(input.len()); MAX_VOICES];
+    let mut outputs: Vec<_> = (0..MAX_VOICES)
+        .map(|_| Vec::with_capacity(input.len()))
+        .collect();
     for block in input.chunks(block_size) {
         buffers.begin_block(block.len());
         engine.process(block, controls, &mut buffers);
