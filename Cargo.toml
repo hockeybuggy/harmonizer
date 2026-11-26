@@ -15,6 +15,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 publish = false
+license = "GPL-3.0-only"
 
 [workspace.dependencies]
 harmonizer-dsp = { path = "crates/harmonizer-dsp" }
