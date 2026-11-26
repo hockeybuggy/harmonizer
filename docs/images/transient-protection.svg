@@ -11,7 +11,7 @@
   <rect x="0.5" y="0.5" width="819" height="384" rx="10" fill="#f8fafc" stroke="#cbd5e1" />
 
   <text x="24" y="30" class="title">Relative Mode: Look-Back Transient Protection</text>
-  <text x="24" y="48" class="subtitle">Detects sharp power spikes (power &gt; 8 × background) and crossfades to the crisp delayed attack to eliminate FFT pre-echo</text>
+  <text x="24" y="48" class="subtitle">Marks a ~1 ms chunk whose average power exceeds 8 × background, then crossfades to the crisp delayed attack</text>
   <rect x="56" y="68" width="736" height="130" rx="6" fill="#ffffff" stroke="#cbd5e1" />
   <text x="68" y="87" class="label">Time-domain signal around onset (t = 0 ms)</text>
   <line x1="74" y1="144" x2="774" y2="144" stroke="#e2e8f0" />
@@ -30,12 +30,13 @@
   <polygon points="132.3,328 132.3,328.0 278.2,258.0 533.4,258.0 635.5,328.0 635.5,328" fill="#0d9488" fill-opacity="0.18" />
   <polyline fill="none" stroke="#0d9488" stroke-width="2.4" points="74.00,328.00 132.33,328.00 278.17,258.00 533.38,258.00 635.46,328.00 774.00,328.00" />
   <line x1="482.3" y1="92" x2="482.3" y2="328" stroke="#d97706" stroke-width="1.6" stroke-dasharray="4 3" />
-  <text x="488.3" y="104" class="annot" fill="#d97706">detected onset</text>
+  <text x="476.3" y="101" text-anchor="end" class="annot" fill="#d97706">marked onset</text>
+  <text x="476.3" y="114" text-anchor="end" class="small">(start of a 64-sample chunk at 48 kHz)</text>
   <text x="154.2" y="272" text-anchor="middle" class="small">look_back</text>
   <text x="154.2" y="285" text-anchor="middle" class="small">fade-in</text>
-  <text x="380.2" y="284" text-anchor="middle" class="annot" fill="#0d9488">protect_before</text>
+  <text x="380.2" y="284" text-anchor="middle" class="annot" fill="#0d9488">full protection</text>
   <text x="380.2" y="298" text-anchor="middle" class="small">(mutes pre-echo)</text>
-  <text x="533.4" y="251" text-anchor="middle" class="annot" fill="#0d9488">hold (3.5 ms)</text>
+  <text x="533.4" y="251" text-anchor="middle" class="annot" fill="#0d9488">hold to +3.5 ms</text>
   <text x="774" y="284" text-anchor="end" class="small">fade_out (7 ms)</text>
   <text x="774" y="298" text-anchor="end" class="small">→ vocoder sustain</text>
   <line x1="132.3" y1="328" x2="132.3" y2="333" stroke="#475569" />

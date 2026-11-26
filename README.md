@@ -32,6 +32,7 @@ cargo xtask bundle harmonizer-plugin --release
 - [Ableton Live guide](docs/ableton-live.md) — install on macOS, route audio and MIDI, and troubleshoot silence.
 - [Command-line guide](docs/cli.md) — render a chord or follow a MIDI file.
 - [Development guide](docs/development.md) — build, test, and validate the plugin.
+- [How it works](docs/how-it-works.md) — the architecture and the DSP behind both modes.
 
 ## Licence
 

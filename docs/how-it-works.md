@@ -1,63 +1,46 @@
 # How Harmonizer Works
 
-Harmonizer is a realtime, MIDI-driven polyphonic harmonizer written in Rust. Feed it audio and hold MIDI notes (or play a MIDI clip), and it renders up to 16 harmony voices — one per active note — while preserving vocal formants and keeping the dry signal latency-aligned.
+Harmonizer re-pitches incoming audio to the MIDI notes you hold. Each held note gets its own voice, up to 16 at once, and the dry signal is delayed so it stays aligned with the harmony.
 
-It ships as a VST3 plugin bundle (containing both an audio-effect variant and a sidechain-fed instrument variant) and as an offline command-line renderer.
+The two modes differ in what a MIDI note means. Sing a steady 220 Hz (A2) into the plugin and hold MIDI note 60 (C3). Note names follow Ableton Live, where MIDI 60 is C3.
 
-## Repository Layout
+| Mode | What note 60 means | Output |
+| --- | --- | --- |
+| **Absolute** | "Sing at C3" — the input's pitch is tracked and replaced | about 262 Hz, whatever pitch you sang |
+| **Relative** | "Shift by the distance from the reference note" (default C3) | 220 Hz, because 60 − 60 = 0 semitones |
 
-| Crate / Path | Role |
-| --- | --- |
-| `crates/harmonizer-dsp` | Pure Rust DSP library with no plugin-framework dependencies. Houses the `Harmonizer` facade, `VoiceAllocator`, `PsolaEngine`, `PitchTracker`, and `VocoderEngine`. |
-| `crates/harmonizer-plugin` | VST3 wrapper built on `nice-plug` (with an `egui` editor). Exports both **Harmonizer** (`Fx`) and **Harmonizer Instrument** (`Instrument`). |
-| `crates/harmonizer-cli` | Offline renderer (`harmonizer` binary) that drives `Harmonizer` block-by-block from WAV + MIDI/note-list inputs. |
-| `crates/vst3-smoke` | Minimal headless VST3 host that loads the built bundle and checks buses, parameters, latency reporting, MIDI-driven audio, state, and editor support. |
-| `xtask` | Build helper (`cargo xtask bundle harmonizer-plugin --release`) that produces `target/bundled/Harmonizer.vst3`. |
+Hold note 64 instead and Absolute sings E3 (about 330 Hz), while Relative shifts the input up four semitones to about 277 Hz. Absolute suits a single voice or instrument with a clear pitch; Relative works on anything, including chords, pads and drums.
+
+Harmonizer ships as a VST3 bundle (an audio effect and a sidechain-fed instrument) and as an offline command-line renderer. Both drive the same DSP code. A [source map](#source-map) at the end lists where each part lives.
 
 ---
 
 ## 1. Architecture & Signal Flow
 
-All audio processing flows through [`Harmonizer`](../crates/harmonizer-dsp/src/harmonizer.rs). Both the VST3 plugin and the offline CLI split incoming audio blocks at exact MIDI event sample offsets, delivering `note_on`, `note_off`, pitch bend, and sustain pedal events between `Harmonizer::process` calls.
+All audio processing flows through [`Harmonizer`](../crates/harmonizer-dsp/src/harmonizer.rs). Both the VST3 plugin and the offline CLI split each incoming audio block at the exact sample offsets of its MIDI events, delivering note on/off, pitch bend and sustain pedal events between `Harmonizer::process` calls.
 
 ```mermaid
-flowchart LR
-    AudioIn["Audio In\n(Mono / Stereo / Sidechain)"] --> MonoSum["Sum to Mono"]
-    AudioIn --> DryDelay["Stereo Dry DelayLine\n(exact engine latency)"]
-    MidiIn["MIDI Events\n(Note On/Off, Bend, Sustain)"] --> Split["Sample-Accurate\nBlock Splitter"]
-    Split --> Alloc["VoiceAllocator\n(up to 16 slots)"]
-    Alloc --> Controls["VoiceControl (16 slots)\n(pitch or ratio, formant)"]
-
-    MonoSum --> ModeSwitch{"Mode"}
-    Controls --> ModeSwitch
-
-    ModeSwitch -->|"Absolute"| Psola["PsolaEngine\nPitch Tracker + Pitch Marks\n+ Expression + PSOLA Grains"]
-    ModeSwitch -->|"Relative"| Vocoder["VocoderEngine\nSTFT + Peak-Locked Phase\n+ Formant Envelope + Transients"]
-
-    Psola --> VoiceBuf["VoiceBuffers\n(16 planar channels)"]
-    Vocoder --> VoiceBuf
-
-    VoiceBuf --> Env["Attack / Release Envelopes\n+ 1/sqrt(n) Loudness Comp"]
-    Env --> Pan["Velocity Gain &\nPitch Stereo Spread"]
-    Pan --> WetGain["Smoothed Wet Gain"]
-    DryDelay --> DryGain["Smoothed Dry Gain"]
-
-    WetGain --> OutSum(("+"))
-    DryGain --> OutSum
-    OutSum --> AudioOut["Audio Out\n(Mono / Stereo)"]
-
-    Alloc -.->|"Relaxed Atomics"| Telemetry["Telemetry & InputWatch"]
-    Psola -.->|"Detected Pitch"| Telemetry
-    Telemetry -.->|"Repaint on Change"| Editor["egui Editor"]
+flowchart TD
+    AudioIn["Audio in<br/>(main input or sidechain)"]
+    MidiIn["MIDI in<br/>(notes, pitch bend, sustain)"]
+    AudioIn --> Mono["Sum to mono"]
+    AudioIn --> Dry["Stereo dry delay<br/>(exactly the engine latency)"]
+    MidiIn --> Alloc["Voice allocator<br/>(up to 16 voices)"]
+    Mono --> Engine["Re-pitching engine<br/>Absolute: PSOLA<br/>Relative: phase vocoder"]
+    Alloc -->|"target per voice"| Engine
+    Engine -->|"one buffer per voice"| Mix["Mix voices<br/>(envelopes, velocity, pan, chord gain)"]
+    Mix -->|"wet"| Out(("+"))
+    Dry -->|"dry"| Out
+    Out --> AudioOut["Audio out"]
 ```
 
-### Key Signal-Path Details
-
-- **Mono analysis, stereo dry & spread:** Incoming stereo audio is averaged to mono (`1 / channel_count`) before entering the active re-pitching engine. The dry signal bypasses the mono sum and passes through a stereo `DelayLine` matched to `engine.latency()`, preserving the original stereo image and phase-aligning it with the wet harmony voices.
-- **Two VST3 plugin classes:** Because DAWs differ in how they route MIDI to audio effects, [`harmonizer-plugin`](../crates/harmonizer-plugin/src/lib.rs) exports two classes sharing the same DSP and UI:
-  - **Harmonizer (`Fx`):** Sits directly on an audio track (mono or stereo) and receives MIDI routed from a MIDI track.
-  - **Harmonizer Instrument (`Instrument`):** Sits directly on a MIDI track with no main audio input and copies its input from a stereo **Sidechain** auxiliary bus before running the exact same processing loop.
-- **Continuous background analysis:** Both engines implement the [`Engine`](../crates/harmonizer-dsp/src/engine.rs) trait and continue analysing incoming audio even when zero voices are active. When a note arrives, the pitch tracker or STFT overlap buffer already has valid history.
+- **Mono analysis, stereo dry:** Stereo input is averaged to mono before it reaches the re-pitching engine. The dry signal skips that sum and passes through a stereo `DelayLine` set to exactly `engine.latency()`, so it keeps its stereo image and lines up with the wet voices.
+- **One target per voice:** Before each block, `Harmonizer` turns every allocated voice's note (plus pitch bend) into a target: a frequency in Hz for Absolute mode, or a pitch ratio for Relative mode.
+- **Two VST3 plugin classes:** DAWs differ in how they route MIDI to audio effects, so [`harmonizer-plugin`](../crates/harmonizer-plugin/src/lib.rs) exports two classes that share the same DSP and UI:
+  - **Harmonizer (`Fx`)** sits on an audio track (mono or stereo) and receives MIDI routed from a MIDI track.
+  - **Harmonizer Instrument (`Instrument`)** sits on a MIDI track with no main audio input and takes its audio from a stereo **Sidechain** bus.
+- **Continuous background analysis:** Both engines implement the [`Engine`](../crates/harmonizer-dsp/src/engine.rs) trait and keep analysing the input even when no voices are active, so the pitch tracker or STFT buffer already has history when a note arrives.
+- **Editor telemetry (outside the audio path):** The audio thread publishes the detected pitch, latency, note envelopes and input level to the `egui` editor through lock-free [`Telemetry`](../crates/harmonizer-plugin/src/telemetry.rs). See [section 5](#5-realtime-safety-latency--verification).
 
 ---
 
@@ -95,48 +78,54 @@ stateDiagram-v2
 
 ## 3. Absolute Mode: Pitch Tracking & PSOLA (`PsolaEngine`)
 
-Absolute mode is designed for monophonic pitched sources (vocals, solo strings, brass, synths). Rather than shifting by a fixed interval, it tracks the input's fundamental frequency $f_0$ and resynthesises the audio at each held MIDI note's exact pitch.
+**The idea:** a sung note is a waveform that repeats once per vocal-fold cycle. Find those cycles, cut each one out as a short grain, and lay the grains back down closer together (higher note) or further apart (lower note). The pitch changes, but each grain still holds the original waveform, so the voice keeps its character.
+
+That is **PSOLA** (pitch-synchronous overlap-add): *pitch-synchronous* because grains are cut one per pitch cycle, and *overlap-add* because neighbouring grains are faded in and out with a window and summed. It needs a monophonic source with a clear pitch (vocals, solo strings, brass, synths), and it involves three steps: measure the input's period, mark each cycle, then place grains at the target note's spacing.
 
 ### Pitch Tracking (`PitchTracker`)
 
-[`PitchTracker`](../crates/harmonizer-dsp/src/pitch.rs) estimates the input period $T_0$ (in samples, supporting fundamentals up to 1000 Hz) every **3 ms** hop using an FFT-accelerated **Normalized Square Difference Function (NSDF)**:
+[`PitchTracker`](../crates/harmonizer-dsp/src/pitch.rs) estimates the input period $`T_0`$ (in samples, for fundamentals up to 1000 Hz) every **3 ms** using the **Normalized Square Difference Function (NSDF)**. The NSDF compares the signal with a copy of itself delayed by lag $`\tau`$: it reaches 1 where the delayed copy lines up perfectly, which happens at the period and at every multiple of it.
 
-$$\text{NSDF}(\tau) = \frac{2 \sum_{j} x_j \, x_{j+\tau}}{\sum_{j} \left(x_j^2 + x_{j+\tau}^2\right)}$$
+```math
+\text{NSDF}(\tau) = \frac{2 \sum_{j} x_j \, x_{j+\tau}}{\sum_{j} \left(x_j^2 + x_{j+\tau}^2\right)}
+```
 
-![NSDF Pitch Tracking](images/nsdf-pitch-tracking.svg)
+![NSDF pitch tracking: a 200 Hz waveform and its NSDF, with peaks at 5 ms and 10 ms and a cutoff line at 0.90](images/nsdf-pitch-tracking.svg)
 
-1. **Autocorrelation via FFT:** The mean-centred analysis window is zero-padded and transformed with `realfft`, squared in magnitude, and inverse-transformed to compute the autocorrelation across all lags in $O(N \log N)$ time. Prefix-summed energy normalises each lag into $[-1, 1]$.
-2. **First strong peak selection:** Everything before the first zero-crossing is ignored (skipping the trivial lag-0 peak). Among local maxima above the clarity threshold (`0.80` on onset, `0.72` while tracking, or `0.9 * best`), the tracker picks the earliest strong peak — preferring the true fundamental over subharmonic multiples ($2 T_0$, $3 T_0$).
-3. **Sub-sample accuracy:** Parabolic interpolation (`peak_offset`) around the winning lag refines $T_0$ to sub-sample precision.
-4. **Breathy-vowel fallback:** If broadband aspiration masks the full-band NSDF, a secondary analysis runs on a shorter **18 ms** window low-passed at **1.3 kHz** (2nd-order filter) where low harmonics survive.
-5. **Octave-jump hysteresis & onset lookback:** Single-hop octave jumps (`0.46..=0.55` or `1.82..=2.18`) must be confirmed on a second consecutive hop before taking effect. When a voiced segment begins after unvoiced audio, `onset_lookback` retroactively fills up to 5 ms of the latency ring buffer with the detected period so note attacks pitch-lock cleanly.
+*The NSDF peaks at both $`T_0`$ (5 ms) and $`2T_0`$ (10 ms). Both clear the 0.90 cutoff, so the tracker takes the earlier one; taking the later one would report the pitch an octave too low.*
+
+1. **Autocorrelation via FFT:** The mean-centred analysis window is zero-padded and run through a forward and inverse FFT (`realfft`) to get the autocorrelation at every lag in $`O(N \log N)`$ time. Prefix-summed energy normalises each lag into $`[-1, 1]`$.
+2. **First strong peak:** Everything before the first zero crossing is ignored, which skips the trivial peak at lag 0. A peak counts as strong only if it clears **both** a fixed floor (`0.80` when no pitch is being tracked yet, `0.72` while tracking) **and** 90% of the best peak in the window. The earliest strong peak wins, which favours the fundamental over its multiples ($`2T_0`$, $`3T_0`$).
+3. **Continuity with the previous period:** While already tracking, the tracker also looks for the best peak within 0.8–1.25× of the previous period, and normally prefers that one, so a single noisy frame doesn't make the pitch jump. The earliest strong peak still wins when its lag is clearly shorter (a higher pitch), or when it lies an octave below the nearby peak and is much clearer (see `PitchTracker::analyse`).
+4. **Sub-sample accuracy:** Parabolic interpolation (`peak_offset`) around the winning lag refines $`T_0`$ to sub-sample precision.
+5. **Breathy vowels:** When aspiration noise masks the full-band NSDF, a second analysis runs on a shorter, low-passed window where the low harmonics survive.
+6. **Octave-jump hysteresis & onset lookback:** A jump of about an octave must be confirmed on a second consecutive analysis before it takes effect. When a voiced segment starts after unvoiced audio, `onset_lookback` fills one period of the latency buffer (at most 5 ms) with the new pitch so note attacks lock on cleanly.
 
 ### Pitch-Mark Detection (`AnalysisMarks`)
 
-To slice the input waveform cleanly into single-cycle grains without phase smearing, [`AnalysisMarks`](../crates/harmonizer-dsp/src/psola.rs) locates one pitch mark per glottal cycle:
-
-- Incoming audio passes through a 3-stage **900 Hz** low-pass filter to isolate the fundamental wave shape.
-- While tracking continuously, each new mark is searched within $\pm 18\%$ of `last_mark + period`, taking the local maximum and refining its fractional sample position with parabolic interpolation.
+To cut one grain per cycle, [`AnalysisMarks`](../crates/harmonizer-dsp/src/psola.rs) places one pitch mark per glottal cycle. It low-passes the input to isolate the fundamental's shape, then searches for each new mark near `last_mark + period`, taking the local maximum and refining its position to a fraction of a sample.
 
 ### PSOLA Grain Overlap-Add & Formant Shifting
 
-For each active voice, [`PsolaEngine`](../crates/harmonizer-dsp/src/psola.rs) places synthesis grain centres spaced by the target period $T_{\text{target}} = f_s / f_{\text{target}}$ (clamped to $[0.25\,T_0,\, 4\,T_0]$). For each synthesis centre, it selects the nearest analysis mark and overlap-adds a Hann-windowed grain centred on that mark.
+For each active voice, [`PsolaEngine`](../crates/harmonizer-dsp/src/psola.rs) places synthesis grain centres spaced by the target period $`T_{\text{target}} = f_s / f_{\text{target}}`$ (clamped to $`[0.25\,T_0,\, 4\,T_0]`$, i.e. two octaves either way). For each synthesis centre, it takes the nearest analysis mark and overlap-adds a Hann-windowed grain centred on that mark.
 
-![PSOLA Grain Overlap-Add and Formant Shifting](images/psola-grains.svg)
+![PSOLA grain overlap-add: input with pitch marks, grains respaced for a higher pitch, and the same spacing with resampled grains for a formant shift](images/psola-grains.svg)
 
-- **Why formants stay natural:** Moving synthesis grains closer together increases the repetition rate (higher pitch), while the waveform *inside* each grain is copied at its original speed — so vocal tract resonances (formants) remain unchanged.
-- **Independent formant shifting:** When the **Formant** knob is non-zero (`formant_ratio != 1.0`), each grain is linearly resampled around its source mark at `grain.source + offset * formant_ratio` with a scaled window radius `period / formant_ratio`. This shifts the vocal tract resonances up or down without changing the note's pitch.
-- **Unison bypass:** When `formant_ratio == 1.0` and the target pitch is within ~0.12% of the input pitch, the engine marks the grain `neutral` and blends the latency-aligned dry sample directly to avoid unnecessary resampling.
-- **Unvoiced passthrough & low-cut:** During unvoiced consonants (`period == 0`), each voice crossfades over **4 ms** to unshifted dry passthrough scaled by $1 / \sqrt{n}$ (because identical consonant copies sum in amplitude while pitched voices sum in power). A per-voice 2nd-order state-variable high-pass filter (`0.4 * target_pitch`, capped at 100 Hz) removes sub-fundamental rumble from shifted grains.
+*Compare the spacing first: panels 2 and 3 place grains 3.33 ms apart, so they produce the same pitch. Then compare the waveform inside each grain: panel 2 copies it unchanged, keeping the formants, while panel 3 squeezes it, moving the formants up.*
+
+- **Why formants stay natural:** Moving grains closer together raises the repetition rate (pitch), while the waveform *inside* each grain plays at its original speed, so the vocal tract resonances (formants) stay where they were.
+- **Independent formant shifting:** When the **Formant** knob is non-zero (`formant_ratio != 1.0`), each grain is resampled around its source mark at `grain.source + offset * formant_ratio`, with its window radius scaled to `period / formant_ratio`. This moves the formants up or down without changing the note.
+- **Unison bypass:** When `formant_ratio == 1.0` and the target pitch is within about 0.12% of the input pitch, the engine uses the latency-aligned dry sample directly instead of resampling.
+- **Unvoiced passthrough & low-cut:** During unvoiced consonants (`period == 0`), each voice crossfades over **4 ms** to unshifted dry audio scaled by $`1 / \sqrt{n}`$, because identical consonant copies sum in amplitude while pitched voices sum in power. A per-voice high-pass filter, set well below the target note, removes rumble from the shifted grains.
 
 ### Expression Contour
 
-Purely snapping every grain to the MIDI note's frequency sounds robotic. [`ExpressionContour`](../crates/harmonizer-dsp/src/psola.rs) extracts the singer's natural vibrato and pitch scoops while removing steady pitch offset:
+Snapping every grain exactly to the MIDI note's frequency sounds robotic. [`ExpressionContour`](../crates/harmonizer-dsp/src/psola.rs) keeps the singer's vibrato and pitch scoops while removing their steady pitch offset from the note:
 
-- Tracks a slow pitch centre ($\tau \approx 180\text{ ms}$) in log-pitch (octave) space.
-- Deviation from that centre (clamped to $\pm 100$ cents, weighted by pitch clarity) modulates the target frequency when **Expression** > 0%.
-- If deviation exceeds **55 cents** (an intentional glide), the centre switches to a fast **12 ms** tracker for 180 ms so the glide settles onto the new note cleanly. Jumps over **150 cents** reset the contour immediately.
-- To compensate for the pitch tracker's half-window lag, `ExpressionContour::ratio` looks ahead in the latency ring buffer and extrapolates using the smoothed contour slope when needed.
+- It tracks a slow pitch centre (about 180 ms) and measures how far the input deviates from it, up to ±100 cents.
+- When **Expression** is above 0%, that deviation, weighted by how clear the pitch is, modulates the voice's target frequency.
+- Intentional glides (over 55 cents) switch the centre to a fast tracker so the glide settles onto the new note cleanly; large jumps (over 150 cents) reset it immediately.
+- To make up for the pitch tracker's lag, `ExpressionContour::ratio` looks ahead in the latency buffer.
 
 ### Absolute Mode Quality Presets
 
@@ -150,44 +139,56 @@ Purely snapping every grain to the MIDI note's frequency sounds robotic. [`Expre
 
 ## 4. Relative Mode: Phase Vocoder (`VocoderEngine`)
 
-Relative mode works on any audio — chords, pads, full mixes, drums, or vocals — by transposing every active voice by the ratio $2^{(\text{note} - \text{reference\_note}) / 12}$ (default reference note is C3 / MIDI 60).
+**The idea:** break the input into its frequency components, move every component up or down by the same ratio, and rebuild the audio. Nothing has to be tracked, so it works on any audio — chords, pads, full mixes, drums, or vocals. The hard parts are keeping the rebuilt sound clean, keeping the formants in place, and keeping sharp attacks sharp.
 
-[`VocoderEngine`](../crates/harmonizer-dsp/src/vocoder.rs) runs a Short-Time Fourier Transform (STFT) overlap-add pipeline with Hann analysis and synthesis windows.
+Each voice requests the shift ratio
+
+```math
+\text{ratio} = 2^{(\text{note} - \text{reference}) / 12}
+```
+
+with C3 (MIDI 60) as the default reference. The engine clamps the ratio to `0.25..=4.0`, i.e. ±24 semitones, so with the default reference MIDI 96 requests 8× but gets 4×.
+
+[`VocoderEngine`](../crates/harmonizer-dsp/src/vocoder.rs) runs a Short-Time Fourier Transform (STFT): it takes overlapping Hann-windowed frames, shifts each frame's spectrum, and overlap-adds the results back together.
 
 ### Peak-Locked Phase Vocoder
 
-A classic phase vocoder shifts every FFT bin independently, which breaks the phase relationship across a Hann window's main lobe and produces a hollow, "phasey" sound. Harmonizer uses **identity phase locking**:
+A classic phase vocoder shifts every FFT bin independently, which breaks the phase relationship across a Hann window's main lobe and produces a hollow, "phasey" sound. Harmonizer uses **identity phase locking**: each spectral peak and the bins around it move as one unit.
 
-1. **Region segmentation (`find_regions`):** Every FFT frame's magnitude spectrum is scanned for local peaks above a noise floor (`loudest * 1e-4`). Midpoints between adjacent peaks partition the spectrum into `Region { peak, end }` slices, and every bin is assigned to its owning peak.
-2. **Peak-locked phase rotation:** For each peak, the engine computes its true instantaneous phase advance from the previous frame and multiplies by `(pitch - 1.0)` to get the phase delta. A single complex rotation is accumulated from the previous frame's owning peak (`previous_owners[peak]`) and applied uniformly across the entire region.
-3. **Intact lobe shifting:** All bins in a region are shifted together by the integer bin offset `shift`, with a sign flip (`-cos, -sin`) on odd bin shifts to keep the phase reference centred in the Hann window. Bins that would alias above Nyquist are dropped cleanly.
+1. **Region segmentation (`find_regions`):** Every frame's magnitude spectrum is scanned for local peaks above a noise floor. Midpoints between adjacent peaks split the spectrum into `Region { peak, end }` slices, and every bin is assigned to its peak.
+2. **Peak-locked phase rotation:** For each peak, the engine measures its true phase advance since the previous frame and multiplies it by `(pitch - 1.0)` to get the extra phase the shifted peak needs. One complex rotation, accumulated from the previous frame's owning peak (`previous_owners[peak]`), is applied to the whole region.
+3. **Intact lobe shifting:** All bins in a region move together by the same whole-bin offset, with a sign flip on odd shifts to keep the phase reference centred in the Hann window. Bins that would land above Nyquist are dropped.
 
 ### Spectral Envelope Formant Preservation
 
-To stop voices from sounding like chipmunks when shifted up (or giants when shifted down), `Analysis::smooth_envelope` estimates the input's smooth spectral envelope every frame:
+Shifting every component also shifts the formants, which makes voices sound like chipmunks when shifted up (or giants when shifted down). To prevent that, `Analysis::smooth_envelope` estimates the input's smooth spectral envelope — the overall shape the vocal tract gives the spectrum — every frame:
 
-1. **Valley filling:** Each bin takes the local maximum magnitude within a $\pm 85\text{ Hz}$ radius, bridging the gaps between individual harmonics so inter-partial dips aren't mistaken for formant valleys.
-2. **Log-magnitude smoothing:** A sliding boxcar average over the same $\pm 85\text{ Hz}$ radius in the log-magnitude domain yields a smooth spectral envelope `envelope[k]`.
-3. **Envelope rescaling:** When shifting bin `src` to `dst`, the engine multiplies by `clamp(envelope[dst / formant_ratio] / envelope[src], 0.125, 8.0)`. With `formant_ratio = 1.0`, shifted partials inherit the original vocal tract shape at their new frequencies; moving the **Formant** knob stretches or compresses the target envelope independently.
+1. **Valley filling:** Each bin takes the local maximum magnitude within ±85 Hz, bridging the gaps between harmonics so the dips between them aren't mistaken for formant valleys.
+2. **Log-magnitude smoothing:** A sliding average over the same radius in the log-magnitude domain yields a smooth envelope `envelope[k]`.
+3. **Envelope rescaling:** When moving bin `src` to `dst`, the engine multiplies it by `clamp(envelope[dst / formant_ratio] / envelope[src], 0.125, 8.0)`. With `formant_ratio = 1.0`, shifted partials take on the original envelope at their new frequencies; moving the **Formant** knob stretches or compresses that envelope independently.
 
-![Phase Vocoder Formant Preservation](images/vocoder-formants.svg)
+![Phase vocoder formant preservation: original spectrum, a naive shift that moves the formants, and Harmonizer's shift that keeps them in place](images/vocoder-formants.svg)
+
+*Follow the F₁ and F₂ bumps. A naive +7 semitone shift (panel 2) drags them up to 1050 and 2850 Hz. Harmonizer's shift (panel 3) moves the harmonics by the same amount but leaves the bumps at 700 and 1900 Hz.*
 
 ### Look-Back Transient Protection
 
-Because an STFT window spans tens of milliseconds, a sharp percussive hit or vocal consonant gets smeared backwards in time as **FFT pre-echo** and loses its punch. [`Transients`](../crates/harmonizer-dsp/src/vocoder.rs) protects attacks directly inside the engine's latency buffer:
+An STFT frame spans tens of milliseconds, so shifting a sharp drum hit or consonant smears part of it backwards in time as **FFT pre-echo**, and the attack loses its punch. [`Transients`](../crates/harmonizer-dsp/src/vocoder.rs) fixes this inside the engine's latency buffer: it spots the attack before it reaches the output and crossfades to an unshifted copy of the input around it.
 
-![Look-Back Transient Protection](images/transient-protection.svg)
+![Transient protection: the crossfade weight ramps up before the marked onset, holds at full until 3.5 ms after it, then fades out over 7 ms](images/transient-protection.svg)
 
-1. **Onset detection:** Every hop, incoming samples are scanned in ~1 ms steps against an exponentially decaying background power estimate ($\tau = 12\text{ ms}$). When `power > max(8 * background, 1e-6)` (with a 20 ms recovery lockout), an onset is marked at its exact future output position in the latency ring buffer.
-2. **Look-back crossfade window:** `Transients::protect` writes a trapezoidal protection weight into the latency buffer *before* the onset reaches the output:
-   - Ramps up from `look_back` (up to 24 ms before onset) to full weight at `protect_before` (up to 14 ms before onset), muting the smeared FFT pre-echo.
-   - Holds at `1.0` for **3.5 ms** across the crisp attack transient.
-   - Fades back to `0.0` over **7 ms**, handing seamlessly off to the pitch-shifted phase vocoder sustain.
-3. **Chord-balanced attack gain:** Unshifted attack copies add in amplitude across voices while sustained shifted voices add in power. `VocoderEngine::attack_gain` scales the transient copy so the attack matches the $\sqrt{n}$ loudness of the sustained chord.
+*The teal curve is how much of the unshifted input is heard. It reaches full weight well before the marked onset to cover the pre-echo, and hands back to the vocoder by 10.5 ms after it.*
+
+1. **Onset detection:** Incoming samples are checked in chunks of 1 ms rounded up to a power-of-two length (64 samples, about 1.33 ms, at 48 kHz) against a background power estimate that decays with a 12 ms time constant. When a chunk's *average* power exceeds 8× the background, the start of that chunk is marked as the onset, so the mark is accurate to the chunk grid rather than to the exact sample. A 20 ms lockout prevents another mark straight after.
+2. **Look-back crossfade:** `Transients::protect` writes a protection weight into the latency buffer before the marked onset reaches the output:
+   - It ramps up from `look_back` before the onset to full weight at `protect_before` before the onset, muting the smeared pre-echo. These are 24 ms and 14 ms at the Balanced and High Quality presets, and about 16 ms and 10.7 ms at Low Latency, whose buffer is shorter.
+   - It holds full weight through the onset until **3.5 ms** after it.
+   - It fades back to zero over the next **7 ms**, handing off to the pitch-shifted sustain.
+3. **Chord-balanced attack gain:** Unshifted attack copies add in amplitude across voices while shifted voices add in power. `VocoderEngine::attack_gain` scales the attack copy so it matches the $`\sqrt{n}`$ loudness of the sustained chord.
 
 ### Relative Mode Quality Presets
 
-FFT size scales to the nearest power of two proportional to `sample_rate / 48 kHz`. Exact latency equals one full FFT frame (`size` samples).
+FFT size scales with `sample_rate / 48 kHz`, rounded to the nearest power of two. Latency is exactly one FFT frame (`size` samples).
 
 | Quality | Base FFT Size (48 kHz) | Overlap | Hop Size | Latency (48 kHz) |
 | --- | --- | --- | --- | --- |
@@ -209,3 +210,15 @@ Audio plugins run inside a strict realtime callback where a single heap allocati
   - `crates/harmonizer-dsp/tests/realtime.rs` wraps `Harmonizer::process` and all MIDI/parameter setters in `assert_no_alloc` to fail the test suite on any audio-thread allocation.
   - DSP integration tests verify detected output pitch, latency alignment, and exact block-size invariance (splitting input into arbitrary block sizes yields identical output).
   - `crates/vst3-smoke` loads the compiled `Harmonizer.vst3` bundle into a minimal host and exercises both plugin classes end-to-end.
+
+---
+
+## Source Map
+
+| Crate / Path | Role |
+| --- | --- |
+| [`crates/harmonizer-dsp`](../crates/harmonizer-dsp) | Pure Rust DSP library with no plugin-framework dependencies. Houses the `Harmonizer` facade, `VoiceAllocator`, `PsolaEngine`, `PitchTracker`, and `VocoderEngine`. |
+| [`crates/harmonizer-plugin`](../crates/harmonizer-plugin) | VST3 wrapper built on `nice-plug` (with an `egui` editor). Exports both **Harmonizer** (`Fx`) and **Harmonizer Instrument** (`Instrument`). |
+| [`crates/harmonizer-cli`](../crates/harmonizer-cli) | Offline renderer (`harmonizer` binary) that drives `Harmonizer` block-by-block from WAV + MIDI/note-list inputs. |
+| [`crates/vst3-smoke`](../crates/vst3-smoke) | Minimal headless VST3 host that loads the built bundle and checks buses, parameters, latency reporting, MIDI-driven audio, state, and editor support. |
+| [`xtask`](../xtask) | Build helper (`cargo xtask bundle harmonizer-plugin --release`) that produces `target/bundled/Harmonizer.vst3`. |
