@@ -130,3 +130,11 @@ callback.
 dependencies; `crates/harmonizer-plugin` wraps it with
 [nice-plug](https://codeberg.org/RustAudio/nice-plug); `crates/harmonizer-cli`
 drives it offline the way a host would.
+
+## Licence
+
+Copyright © 2026 Douglas Anderson. Harmonizer is licensed under the
+[GNU General Public License, version 3 only](LICENSE).
+
+The vendored copy of `nice-plug` is covered by its upstream
+[ISC licence](vendor/nice-plug/LICENSE).
