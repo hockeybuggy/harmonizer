@@ -22,7 +22,8 @@ losing the character of the source.
 
 ## Get started
 
-With [Rust](https://rustup.rs/) installed, build the VST3 from the repo root:
+With [Rust 1.100 or newer](https://rustup.rs/) installed, build the VST3 from
+the repo root:
 
 ```sh
 cargo xtask bundle harmonizer-plugin --release
