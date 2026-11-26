@@ -1,140 +1,39 @@
 # Harmonizer
 
-A realtime polyphonic harmonizer, driven by MIDI. Hold a note and the incoming
-audio is re-pitched to it; hold a chord and you get one voice per note.
+**Play a chord. Turn one voice into a choir.**
 
-- **Absolute mode** tracks the pitch of a monophonic input (voice, solo
-  instrument) and resynthesises it around each held note, using pitch detection
-  and PSOLA.
-- **Relative mode** transposes any input — chords, pads, drums — by the
-  interval between each held note and a reference note (C3 by default), using
-  a phase vocoder.
+Harmonizer re-pitches live audio to the MIDI notes you play. Use it as a VST3
+in Ableton Live or render WAV files with the command-line tool.
 
-Both modes preserve formants, so voices don't turn into chipmunks, and have a
-**Formant** knob to shift them for character. **Quality** trades latency for
-smoothness; the latency is reported to the host, which compensates for it.
+![Harmonizer in Absolute mode, with an A2 input and four harmony voices lit on the keyboard](docs/media/harmonizer.png)
 
-Runs as a VST3 plugin or as an offline command-line renderer.
+**[Hear the demo — dry, then harmonized (MP3)](docs/media/harmonizer-demo.mp3?raw=true)**
 
-## Building and installing
+The same synthetic vocal phrase twice: first dry, then re-pitched into a
+four-chord progression in Absolute mode.
+
+- **Absolute** follows the pitch of a single voice or instrument and maps it to
+  the notes you hold, with control over how much vibrato and pitch movement carry through.
+- **Relative** shifts the whole input by an interval for each note you hold.
+  Use it on pads, chords, or loops.
+
+Both modes preserve formants by default so you can change pitch without
+losing the character of the source.
+
+## Get started
+
+With [Rust](https://rustup.rs/) installed, build the VST3 from the repo root:
 
 ```sh
 cargo xtask bundle harmonizer-plugin --release
-cp -R target/bundled/Harmonizer.vst3 ~/Library/Audio/Plug-Ins/VST3/
 ```
 
-In Live, enable **Use VST3 Plug-in System Folders** under Settings → Plug-Ins
-and rescan. The bundle contains two plugins with the same sound and controls:
-
-- **Harmonizer** — an audio effect. Put it on the audio track you want
-  harmonized.
-- **Harmonizer Instrument** — an instrument that takes its audio through a
-  sidechain input. Use it if your host won't send MIDI to an audio effect.
-
-## Using it in Ableton Live
-
-The harmonizer needs two things: audio to re-pitch, and MIDI notes saying
-which pitches to make. With **Dry** at −∞ (the default) it's silent until both
-arrive. The editor says which one is missing.
-
-### Audio effect (Harmonizer)
-
-1. Put **Harmonizer** on the audio track you want harmonized. To sing live,
-   set that track's input to your microphone and its **Monitor** to **In**
-   (or **Auto**, then arm it). Use headphones, or the harmony will feed back
-   through the mic.
-2. Create a MIDI track for the notes. Set its **MIDI To** to the audio track,
-   and the chooser underneath to **Harmonizer**.
-3. Arm the MIDI track to play notes from a keyboard (or Live's computer
-   keyboard), or give it a MIDI clip.
-
-### Instrument (Harmonizer Instrument)
-
-1. Put **Harmonizer Instrument** on a MIDI track. Arm it to play notes, or give
-   it a MIDI clip.
-2. In the device's **Sidechain** menu, choose the track to harmonize.
-3. That track must be producing audio: a playing clip, or a microphone with
-   **Monitor** on **In**. Mute it, or turn **Dry** up on the harmonizer,
-   depending on whether you want to hear the original too.
-
-### The plugin window
-
-- **Input** shows the note you're singing, how many cents off it is, and the
-  input level. In Relative mode it shows the reference note instead.
-- **Voices** is a keyboard from C1 to C6 that lights up the harmony notes as
-  they sound, names them, and marks your input pitch in blue.
-- The cards below hold the settings: **Voice** (formant, plus expression or
-  reference depending on the mode), **Mix** and **Notes**.
-
-### Live's device panel
-
-Unfold the device (the triangle in its title bar) to get the parameters as
-Live controls, so you can adjust, automate and MIDI-map them without opening
-the plugin window. They're laid out in three columns: mode and mix, voice,
-then how notes play. Open the plugin window (the wrench icon) for the input
-readout and the keyboard.
-
-### If it's silent
-
-A message over the keyboard explains what's missing:
-
-- *No audio coming in* or *No sidechain audio*: nothing reaches the plugin.
-  Check the track input, its Monitor setting, and the sidechain source.
-- *Waiting for notes*: no MIDI has arrived. Check MIDI To, and that the MIDI
-  track is armed or playing a clip.
-- *No clear pitch*: Absolute mode follows a single voice. Use Relative for
-  chords, drums and other polyphonic input.
-
-### Tips
-
-- Raise **Dry** to blend the original in at the same latency.
-- **Low latency** is for playing live through monitors; **High quality** is for
-  mixing, where Live's delay compensation hides the latency.
-- **Expression** (Absolute only) keeps vibrato and scoops around each held note:
-  100% by default, 0% for fixed pitch (`--expression 0` in the CLI).
-- **Spread** pans voices by pitch, low notes left and high notes right.
-- Pitch bend moves every voice by up to **Bend range** semitones, and the
-  sustain pedal holds voices after you let go of the keys.
-- Chords are balanced to the loudness of one voice, so adding notes doesn't
-  make the track louder. Voices can still line up into peaks a couple of dB
-  above the input, so leave a little headroom.
-
-## Offline rendering
-
-```sh
-cargo run --release -p harmonizer-cli -- \
-  --input vocal.wav --output harmony.wav --notes C3,E3,G3
-cargo run --release -p harmonizer-cli -- \
-  --input vocal.wav --output harmony.wav --midi chords.mid --mode relative
-```
-
-Run with `--help` for every option. Note names use Live's convention: C3 is
-MIDI note 60.
-
-## Development
-
-```sh
-cargo test -p harmonizer-dsp -p harmonizer-cli
-cargo clippy --workspace --all-targets
-cargo xtask bundle harmonizer-plugin --release
-cargo run --release -p vst3-smoke -- target/bundled/Harmonizer.vst3
-```
-
-`vst3-smoke` is a minimal VST3 host: it loads the bundle, checks both plugin
-classes' buses, parameters, latency reporting, MIDI-driven audio, state and
-editor, and exits non-zero on the first problem. Build the bundle without
-`--release` to also have nice-plug abort on any allocation in the audio
-callback.
-
-`crates/harmonizer-dsp` holds all the DSP with no plugin-framework
-dependencies; `crates/harmonizer-plugin` wraps it with
-[nice-plug](https://codeberg.org/RustAudio/nice-plug); `crates/harmonizer-cli`
-drives it offline the way a host would.
+- [Ableton Live guide](docs/ableton-live.md) — install on macOS, route audio and MIDI, and troubleshoot silence.
+- [Command-line guide](docs/cli.md) — render a chord or follow a MIDI file.
+- [Development guide](docs/development.md) — build, test, and validate the plugin.
 
 ## Licence
 
 Copyright © 2026 Douglas Anderson. Harmonizer is licensed under the
 [GNU General Public License, version 3 only](LICENSE).
-
-The vendored copy of `nice-plug` is covered by its upstream
-[ISC licence](vendor/nice-plug/LICENSE).
+Vendored `nice-plug` retains its [ISC licence](vendor/nice-plug/LICENSE).
